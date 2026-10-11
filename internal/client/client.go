@@ -12,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/config"
-	"github.com/husniadil/herdr-sched/internal/protocol"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/config"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/protocol"
 )
 
 // StartTimeout bounds the wait for a daemon this client had to start. An

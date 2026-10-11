@@ -8,9 +8,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/husniadil/herdr-sched/internal/cli"
-	"github.com/husniadil/herdr-sched/internal/project"
-	"github.com/husniadil/herdr-sched/internal/protocol"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cli"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/project"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/protocol"
 )
 
 // §4.2 on the door that has no working directory of its own worth speaking

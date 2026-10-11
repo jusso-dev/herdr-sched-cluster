@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 // The vocabulary is closed. A job or a trigger carries one of these four and

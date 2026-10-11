@@ -7,10 +7,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/project"
-	"github.com/husniadil/herdr-sched/internal/protocol"
-	"github.com/husniadil/herdr-sched/internal/verbs"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/project"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/protocol"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/verbs"
 )
 
 // Call is one parsed invocation: the verb, the request both doors build for

@@ -26,7 +26,7 @@ builds:
     # whatever the working tree happened to say when it was built.
     ldflags:
       - -s -w
-      - -X github.com/husniadil/herdr-sched/internal/version.Version={{ .Version }}
+      - -X github.com/jusso-dev/herdr-sched-cluster/internal/version.Version={{ .Version }}
     # Reproducible archives: without this the binary carries its build time and
     # two builds of one tag differ.
     mod_timestamp: "{{ .CommitTimestamp }}"

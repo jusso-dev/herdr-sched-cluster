@@ -19,15 +19,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/config"
-	"github.com/husniadil/herdr-sched/internal/fire"
-	"github.com/husniadil/herdr-sched/internal/gate"
-	"github.com/husniadil/herdr-sched/internal/protocol"
-	"github.com/husniadil/herdr-sched/internal/store"
-	"github.com/husniadil/herdr-sched/internal/trigger"
-	"github.com/husniadil/herdr-sched/internal/verbs"
-	"github.com/husniadil/herdr-sched/internal/version"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/config"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/fire"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/gate"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/protocol"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/trigger"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/verbs"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/version"
 )
 
 // SocketMode is what the socket and the lock are created with. The state dir

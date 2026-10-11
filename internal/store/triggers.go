@@ -1,8 +1,8 @@
 package store
 
 import (
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/trigger"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/trigger"
 )
 
 // EntityTrigger is an inbound signal (note 2): a webhook on a server-issued

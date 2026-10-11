@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/husniadil/herdr-sched/internal/mcpdoor"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/mcpdoor"
 )
 
 // §4.2: `hsched mcp --project <dir>` has to REACH the door. --project is a

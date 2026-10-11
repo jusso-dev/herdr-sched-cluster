@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 // Secrets is every webhook's HMAC key, kept in a file of its OWN and never in

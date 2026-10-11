@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/husniadil/herdr-sched/internal/sibling"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/sibling"
 )
 
 // Client dispatches as one firing signal.

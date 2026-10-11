@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/husniadil/herdr-sched/internal/sibling"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/sibling"
 )
 
 // Client files tasks on the board as one firing signal.

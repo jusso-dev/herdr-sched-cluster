@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/client"
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/daemon"
-	"github.com/husniadil/herdr-sched/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/client"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/daemon"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
 )
 
 // Door names this surface in the daemon's log.

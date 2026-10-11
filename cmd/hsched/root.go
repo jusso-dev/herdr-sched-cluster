@@ -8,10 +8,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/husniadil/herdr-sched/internal/cli"
-	"github.com/husniadil/herdr-sched/internal/config"
-	"github.com/husniadil/herdr-sched/internal/mcpdoor"
-	"github.com/husniadil/herdr-sched/internal/version"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cli"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/config"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/mcpdoor"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/version"
 )
 
 // newRootCmd is the whole command tree: the verbs come from the registry both
@@ -24,6 +24,7 @@ func newRootCmd() *cobra.Command { return newRootCmdWith(serveMCP) }
 func newRootCmdWith(serve func(mcpdoor.Options) error) *cobra.Command {
 	root := cli.Root(cli.Send)
 	root.AddCommand(newDaemonCmd(), newMCPCmd(serve), newVersionCmd())
+	attachUnder(root, "cluster", newProbeCmd())
 	return root
 }
 

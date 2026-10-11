@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/store"
-	"github.com/husniadil/herdr-sched/internal/trigger"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/trigger"
 )
 
 // WebhookPrefix is the one path this door answers on. Everything under it is a

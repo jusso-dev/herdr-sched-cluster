@@ -12,8 +12,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/husniadil/herdr-sched/internal/cli"
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cli"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 func main() {

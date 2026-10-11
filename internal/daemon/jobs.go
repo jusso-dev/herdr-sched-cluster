@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/action"
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/cron"
-	"github.com/husniadil/herdr-sched/internal/job"
-	"github.com/husniadil/herdr-sched/internal/protocol"
-	"github.com/husniadil/herdr-sched/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/action"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cron"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/job"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/protocol"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
 )
 
 // JobRow is one schedule as a caller reads it: the row itself, plus the next

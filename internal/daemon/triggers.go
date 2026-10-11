@@ -5,11 +5,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/action"
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/protocol"
-	"github.com/husniadil/herdr-sched/internal/store"
-	"github.com/husniadil/herdr-sched/internal/trigger"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/action"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/protocol"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/trigger"
 )
 
 // TriggerRow is one trigger as a caller reads it. It carries NO secret, and it

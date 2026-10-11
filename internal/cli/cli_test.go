@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/testenv"
-	"github.com/husniadil/herdr-sched/internal/verbs"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/testenv"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/verbs"
 )
 
 // §4.2 and §3.2 fix four globals for every plugin's CLI, and they are on the

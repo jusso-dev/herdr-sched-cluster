@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/action"
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/action"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 // The two kinds of trigger, and there is no third (note 2): an inbound webhook

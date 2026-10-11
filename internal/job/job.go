@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/action"
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/cron"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/action"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cron"
 )
 
 // MaxCounted bounds how many missed instants a decision counts. A job on

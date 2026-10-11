@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 // §5.1 and §10.1: the short name governs everything nameable, and everything derived

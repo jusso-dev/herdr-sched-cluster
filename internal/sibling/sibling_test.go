@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/husniadil/herdr-sched/internal/testenv"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/testenv"
 )
 
 // Every call answers in JSON and declares who fired it, and neither is a

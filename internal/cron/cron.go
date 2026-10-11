@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 // searchYears bounds both walks. A schedule that names an instant no calendar

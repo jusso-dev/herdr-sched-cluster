@@ -10,7 +10,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/husniadil/herdr-sched/internal/sibling"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/sibling"
 )
 
 // Client posts mail as one firing signal.

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 func at(ms int64) time.Time { return time.UnixMilli(ms) }

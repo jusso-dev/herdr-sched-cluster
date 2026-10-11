@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 // The four kinds. A fifth is a deliberate edit here and in the spec below.

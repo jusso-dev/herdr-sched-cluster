@@ -12,13 +12,13 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/husniadil/herdr-sched/internal/cli"
-	"github.com/husniadil/herdr-sched/internal/client"
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/daemon"
-	"github.com/husniadil/herdr-sched/internal/protocol"
-	"github.com/husniadil/herdr-sched/internal/verbs"
-	"github.com/husniadil/herdr-sched/internal/version"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cli"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/client"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/daemon"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/protocol"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/verbs"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/version"
 )
 
 // ServerName is how this server registers itself: the repository an operator

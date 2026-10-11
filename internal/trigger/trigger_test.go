@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/action"
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/action"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 func at(s string) time.Time {

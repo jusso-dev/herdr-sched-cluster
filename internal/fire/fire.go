@@ -20,13 +20,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/action"
-	"github.com/husniadil/herdr-sched/internal/hdis"
-	"github.com/husniadil/herdr-sched/internal/hmail"
-	"github.com/husniadil/herdr-sched/internal/htask"
-	"github.com/husniadil/herdr-sched/internal/shellact"
-	"github.com/husniadil/herdr-sched/internal/sibling"
-	"github.com/husniadil/herdr-sched/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/action"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/hdis"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/hmail"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/htask"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/shellact"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/sibling"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
 )
 
 // Runner fires actions and writes what happened to the store.

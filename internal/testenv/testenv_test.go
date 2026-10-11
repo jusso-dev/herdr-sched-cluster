@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/husniadil/herdr-sched/internal/config"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/config"
 )
 
 // PATH is replaced rather than prepended to, so a call whose fake was never

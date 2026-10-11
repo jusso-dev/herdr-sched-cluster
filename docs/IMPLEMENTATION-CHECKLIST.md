@@ -21,13 +21,14 @@ This file is updated in the same commit as the work it describes.
 
 | Item | Status |
 | --- | --- |
-| `Snapshot` type and JSON shape | not started |
-| Linux collector (memory, PSI pressure, swap, CPU, load, disk, uptime, power, thermal) | not started |
-| macOS collector behind build tags | not started |
-| Windows static-capacity backend | not started |
-| Per-PID sampling (RSS, CPU) | not started |
-| Agent runtime discovery (which agent CLIs are on `PATH`) | not started |
-| `hsched cluster probe --json` | not started |
+| `Snapshot` type and JSON shape (`internal/cluster/resource`) | done |
+| Linux collector: `MemAvailable`, PSI memory and IO pressure, swap and swap activity, CPU use from `/proc/stat`, load, physical cores, uptime, disk, power supply, thermal zones, `nvidia-smi` when present | done, tested on real Linux (Debian 13, x86-64) |
+| macOS collector: `sysctl` memory, page counts, `kern.memorystatus_vm_pressure_level`, swap, load, cores, perf cores, uptime; `ps` for CPU and per-process use; `pmset` for battery and thermal | partial: compiles and the parsers are unit tested; the live collector runs on the macOS CI runner. **Untested on Justin's M3 Max and M4 hardware.** CPU use on macOS is the sum of `ps` %CPU, which is a decaying average, not an instantaneous reading. |
+| Windows | Explicit static backend: capacity declared in config. No live probe. |
+| Per-PID sampling, children folded in (RSS, CPU) | done (Linux from `/proc`, macOS from `ps`) |
+| Agent runtime discovery (Herdr's executable names, `PATH` plus common install directories) | done. Advisory only: a non-interactive SSH `PATH` can differ from the shell Herdr starts agents in. |
+| `hsched cluster probe` (no daemon) | done |
+| SSH transport: fixed argv, allow-listed and quoted words, `BatchMode=yes`, bounded output, schema check | done, tested with a stand-in `ssh` |
 
 ## Phase 3: placement core
 

@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 // Options is the §4.2 resolution order, as data.

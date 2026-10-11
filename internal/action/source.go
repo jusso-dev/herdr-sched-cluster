@@ -3,7 +3,7 @@ package action
 import (
 	"strings"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 // The two signal kinds, and there is no third (note 2).

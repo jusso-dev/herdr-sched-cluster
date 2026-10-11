@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/action"
-	"github.com/husniadil/herdr-sched/internal/store"
-	"github.com/husniadil/herdr-sched/internal/testenv"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/action"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/testenv"
 )
 
 func runner(t *testing.T) (*Runner, *testenv.Fake) {

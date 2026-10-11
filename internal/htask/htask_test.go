@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/husniadil/herdr-sched/internal/sibling"
-	"github.com/husniadil/herdr-sched/internal/testenv"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/sibling"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/testenv"
 )
 
 func client(t *testing.T) (*Client, *testenv.Fake) {

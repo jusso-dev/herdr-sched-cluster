@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/config"
-	"github.com/husniadil/herdr-sched/internal/fire"
-	"github.com/husniadil/herdr-sched/internal/job"
-	"github.com/husniadil/herdr-sched/internal/protocol"
-	"github.com/husniadil/herdr-sched/internal/store"
-	"github.com/husniadil/herdr-sched/internal/testenv"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/config"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/fire"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/job"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/protocol"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/testenv"
 )
 
 // nightlyArgs is a well-formed `job add` call: 3am daily, filing a task.

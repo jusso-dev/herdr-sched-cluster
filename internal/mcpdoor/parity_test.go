@@ -13,15 +13,15 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/husniadil/herdr-sched/internal/cli"
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/config"
-	"github.com/husniadil/herdr-sched/internal/daemon"
-	"github.com/husniadil/herdr-sched/internal/project"
-	"github.com/husniadil/herdr-sched/internal/protocol"
-	"github.com/husniadil/herdr-sched/internal/store"
-	"github.com/husniadil/herdr-sched/internal/testenv"
-	"github.com/husniadil/herdr-sched/internal/verbs"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cli"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/config"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/daemon"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/project"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/protocol"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/testenv"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/verbs"
 )
 
 // pinnedTools is the tool list this door publishes. Adding, renaming or

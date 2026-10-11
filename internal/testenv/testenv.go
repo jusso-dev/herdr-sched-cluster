@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/husniadil/herdr-sched/internal/config"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/config"
 )
 
 // Fake is one directory of stand-in binaries, and the only place a test can

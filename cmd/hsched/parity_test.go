@@ -7,8 +7,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/husniadil/herdr-sched/internal/mcpdoor"
-	"github.com/husniadil/herdr-sched/internal/verbs"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/mcpdoor"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/verbs"
 )
 
 // §7.1: the MCP door is a subcommand of the same binary, so an operator wires
@@ -126,6 +126,7 @@ func TestTheSubcommandTreeHoldsOnlyVerbsAndTheNamedExemptions(t *testing.T) {
 		"mcp":        "§7.1: it IS the MCP door; a tool that starts the door serving it is a loop",
 		"version":    "§13.4: it answers off this binary rather than the daemon, so it works with no daemon at all — doctor relays the same two facts over both doors",
 		"completion": "cobra's own shell-completion command, which describes this binary to a shell",
+		"probe":      "`hsched cluster probe` measures THIS machine and talks to no daemon, so a coordinator can run it on a remote worker over SSH; the daemon's cluster.workers verb carries the same readings on both doors",
 	}
 	// A group — `parked`, `job` — is a command that carries subcommands and
 	// does nothing itself. It is read off the registry rather than listed
@@ -145,7 +146,7 @@ func TestTheSubcommandTreeHoldsOnlyVerbsAndTheNamedExemptions(t *testing.T) {
 				walk(sub, here)
 				continue
 			}
-			if groups[sub.Name()] && len(here) == 1 {
+			if (groups[sub.Name()] || sub.Name() == "cluster") && len(here) == 1 {
 				walk(sub, here)
 				continue
 			}

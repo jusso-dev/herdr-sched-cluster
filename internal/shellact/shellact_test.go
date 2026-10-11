@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/testenv"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/testenv"
 )
 
 // A shell action runs detached from the tick (note 2): Start hands back a

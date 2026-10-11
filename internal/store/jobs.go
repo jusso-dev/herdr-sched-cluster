@@ -1,8 +1,8 @@
 package store
 
 import (
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/job"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/job"
 )
 
 // EntityJob is a cron schedule (note 2). Unlike a run, it HAS a list of rows

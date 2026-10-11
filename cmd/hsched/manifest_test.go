@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/husniadil/herdr-sched/internal/config"
-	"github.com/husniadil/herdr-sched/internal/verbs"
-	"github.com/husniadil/herdr-sched/internal/version"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/config"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/verbs"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/version"
 )
 
 // repoFile reads a file from the repository root, which is two directories up

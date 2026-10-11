@@ -9,11 +9,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/config"
-	"github.com/husniadil/herdr-sched/internal/daemon"
-	"github.com/husniadil/herdr-sched/internal/fire"
-	"github.com/husniadil/herdr-sched/internal/store"
-	"github.com/husniadil/herdr-sched/internal/version"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/config"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/daemon"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/fire"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/version"
 )
 
 // serve is the daemon: it owns the store and the tick, and answers the socket

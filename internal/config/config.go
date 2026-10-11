@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 // Name is the plugin's short name, and the one name everything nameable is

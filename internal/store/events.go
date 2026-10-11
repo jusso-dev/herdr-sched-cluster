@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
 )
 
 // Event is one state change of this plugin's own, as §8.1 shapes it:

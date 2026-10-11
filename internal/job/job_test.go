@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/action"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/action"
 )
 
 func at(t *testing.T, s string) time.Time {

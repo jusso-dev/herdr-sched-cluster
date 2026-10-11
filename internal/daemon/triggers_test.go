@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/protocol"
-	"github.com/husniadil/herdr-sched/internal/store"
-	"github.com/husniadil/herdr-sched/internal/testenv"
-	"github.com/husniadil/herdr-sched/internal/trigger"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/protocol"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/store"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/testenv"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/trigger"
 )
 
 // deployArgs is a well-formed `trigger add` for a webhook that files a task.

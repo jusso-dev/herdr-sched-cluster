@@ -29,9 +29,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/job"
-	"github.com/husniadil/herdr-sched/internal/trigger"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/job"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/trigger"
 )
 
 // Version is the document's shape. A document from a version this binary does

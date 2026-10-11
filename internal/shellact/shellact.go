@@ -17,8 +17,8 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/husniadil/herdr-sched/internal/codes"
-	"github.com/husniadil/herdr-sched/internal/sibling"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/sibling"
 )
 
 // MaxOutput is how much of a command's output a run keeps. The store is one
