@@ -52,6 +52,66 @@ func writeCluster(verb string, result json.RawMessage, out io.Writer) error {
 			fmt.Fprintf(out, "%-14s %-13s %8dM %8dM %8dM %-9s %6.0f %6d %s\n", name, w.State, s.Memory.TotalMB,
 				w.FreeMemoryMB, w.PendingMemoryMB, orDash(s.Memory.Pressure), s.CPU.UtilPct, w.ActiveAgents, strings.Join(notes, "; "))
 		}
+	case "cluster.status":
+		var st coord.Status
+		if err := json.Unmarshal(result, &st); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, st.Summary)
+		fmt.Fprintf(out, "%-14s %-13s %-13s %9s %9s %9s %-9s %6s %s\n", "WORKER", "STATE", "PLATFORM", "TOTAL", "FREE", "KEEPFREE", "PRESSURE", "AGENTS", "ROOM")
+		for _, w := range st.Workers {
+			plat := "-"
+			if w.OS != "" {
+				plat = w.OS + "/" + w.Arch
+			}
+			agents := fmt.Sprintf("%d", w.ActiveAgents)
+			if w.MaxAgents > 0 {
+				agents += fmt.Sprintf("/%d", w.MaxAgents)
+			}
+			fmt.Fprintf(out, "%-14s %-13s %-13s %8dM %8dM %8dM %-9s %6s %d\n", nameOr(w.Label, w.ID), w.State, plat,
+				w.TotalMB, w.FreeMB, w.KeepFreeMB, orDash(w.Pressure), agents, w.RoomFor)
+		}
+		fmt.Fprintf(out, "ROOM counts agents of %d MB and %.1f cpu; plan a real batch with: hsched cluster plan --kind <kind> --repo <dir> --count N\n",
+			st.DefaultMemoryMB, st.DefaultCPU)
+	case "cluster.plan":
+		var p coord.Plan
+		if err := json.Unmarshal(result, &p); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, p.Summary)
+		for _, j := range p.Jobs {
+			where := "-"
+			if j.Worker != "" {
+				where = nameOr(j.WorkerLabel, j.Worker)
+			}
+			fmt.Fprintf(out, "%-8s %-13s %-12s %-8s %-28s %6dM  %s\n", j.Ref, j.Outcome, where, j.Kind, j.Repo, j.MemoryMB, j.Reason)
+		}
+		fmt.Fprintln(out, "workers after this plan:")
+		for _, w := range p.Workers {
+			fmt.Fprintf(out, "  %-14s %-11s +%d agents, free %dM -> %dM (keeps %dM free)\n", nameOr(w.Label, w.ID), w.State,
+				w.PlannedAgents, w.FreeBeforeMB, w.FreeAfterMB, w.KeepFreeMB)
+		}
+		for _, a := range p.Advice {
+			fmt.Fprintf(out, "note: %s\n", a)
+		}
+		fmt.Fprintln(out, "nothing was submitted; this was a dry run")
+	case "cluster.queue":
+		var q coord.QueueView
+		if err := json.Unmarshal(result, &q); err != nil {
+			return err
+		}
+		if q.Count == 0 {
+			fmt.Fprintln(out, "the queue is empty")
+			return nil
+		}
+		for _, e := range q.Entries {
+			held := ""
+			if e.HeldWorker != "" {
+				held = " (holding " + e.HeldWorker + " clear)"
+			}
+			fmt.Fprintf(out, "%3d. %-6s %-8s %-28s %6dM prio %d->%d waited %s%s\n     %s\n", e.Position, e.Job, e.Kind, e.Repo,
+				e.MemoryMB, e.Priority, e.EffectivePriority, (time.Duration(e.WaitingSeconds) * time.Second).String(), held, e.Reason)
+		}
 	case "cluster.submit":
 		var rep daemon.ClusterSubmitted
 		if err := json.Unmarshal(result, &rep); err != nil {
@@ -179,6 +239,13 @@ func writeCandidates(out io.Writer, cs []placement.Candidate) {
 		}
 		fmt.Fprintf(out, "    %-12s ruled out: %s\n", c.WorkerID, strings.Join(c.Reasons, "; "))
 	}
+}
+
+func nameOr(label, id string) string {
+	if label != "" && label != id {
+		return label
+	}
+	return id
 }
 
 func orDash(s string) string {

@@ -38,8 +38,18 @@ func TestTheManifestVersionIsTheBinarysVersion(t *testing.T) {
 // manifest builds the binary this package actually is.
 func TestTheManifestBuildsThisBinary(t *testing.T) {
 	manifest := repoFile(t, "herdr-plugin.toml")
-	if !strings.Contains(manifest, `"./bin/hsched", "./cmd/hsched"`) {
-		t.Fatal("the [[build]] step does not build ./cmd/hsched into ./bin/hsched")
+	if !strings.Contains(manifest, `command = ["./scripts/build.sh"]`) {
+		t.Fatal("the [[build]] step does not run ./scripts/build.sh")
+	}
+	script := repoFile(t, "scripts/build.sh")
+	if !strings.Contains(script, "-o ./bin/hsched ./cmd/hsched") {
+		t.Fatal("scripts/build.sh does not build ./cmd/hsched into ./bin/hsched")
+	}
+	// The prebuilt path fetches the archive goreleaser names, so the two
+	// spellings must agree.
+	if !strings.Contains(script, `hsched_${version}_${os}_${arch}.tar.gz`) ||
+		!strings.Contains(repoFile(t, ".goreleaser.yaml"), `hsched_{{ .Version }}_{{ .Os }}_{{ .Arch }}`) {
+		t.Fatal("scripts/build.sh and .goreleaser.yaml disagree on the release asset name")
 	}
 }
 

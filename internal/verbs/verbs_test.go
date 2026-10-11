@@ -96,6 +96,15 @@ func TestEveryRequiredArgumentIsPositional(t *testing.T) {
 			}
 			switch a.Type {
 			case String, Bool, Int, Object:
+			case List:
+				if len(a.Items) == 0 {
+					t.Errorf("verb %q takes %q as a list with no item fields", v.Name, a.Name)
+				}
+				for _, f := range a.Items {
+					if f.Desc == "" {
+						t.Errorf("verb %q list %q has field %q with no description", v.Name, a.Name, f.Name)
+					}
+				}
 			default:
 				t.Errorf("verb %q takes %q as %q, which is no argument kind", v.Name, a.Name, a.Type)
 			}

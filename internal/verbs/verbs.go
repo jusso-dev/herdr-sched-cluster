@@ -18,6 +18,10 @@ const (
 	// because a repeatable --arg key=value is a shape the other door has no
 	// way to spell.
 	Object = "object"
+	// List is an ordered list of objects, each shaped by the arg's Items. On
+	// the MCP door it is an array in the schema, and on the CLI it is a flag
+	// carrying one JSON array, for the same reason Object is.
+	List = "list"
 )
 
 // Arg is one parameter of a verb. A positional arg is a CLI positional and an
@@ -28,6 +32,8 @@ type Arg struct {
 	Desc       string
 	Required   bool
 	Positional bool
+	// Items describes the fields of each element of a List argument.
+	Items []Arg
 }
 
 // Verb is one operation, in every surface it appears in.
@@ -317,6 +323,45 @@ var All = []Verb{
 		},
 	},
 	{
+		Name: "cluster.status", MCP: "cluster_status", CLI: []string{"cluster", "status"},
+		Short: "Summarise cluster capacity and work in one answer",
+		Long: "Read-only. Start here before spreading work. For each worker: state, OS and " +
+			"architecture, memory total and free after reservations, the memory it always " +
+			"keeps free, pressure, agents running, and roughly how many more agents of the " +
+			"default size fit under every hard limit. Also job counts by state and the " +
+			"configured defaults. The room figure is a guide; cluster_plan gives the real " +
+			"answer for a specific batch.",
+	},
+	{
+		Name: "cluster.plan", MCP: "cluster_plan", CLI: []string{"cluster", "plan"},
+		Short: "Work out where a batch of agents would run, without starting anything",
+		Long: "Read-only dry run of submitting several jobs at once. Give either jobs (a list, " +
+			"one entry per agent) or kind, repo and count for N identical agents. It runs the " +
+			"same estimates, hard limits, scoring and queue pass a real submit would, behind " +
+			"whatever is already queued, and answers per job: would_place on which worker and " +
+			"why, would_queue and what it is waiting for, or would_refuse and why. It queues, " +
+			"reserves and launches nothing and records no decision, so it is safe to call as " +
+			"often as you like. Use it before fanning out, then submit the jobs you still want.",
+		Args: []Arg{
+			{Name: "jobs", Type: List, Desc: "The proposed jobs, in submission order", Items: PlanItems},
+			{Name: "kind", Type: String, Desc: "With repo and count: the agent kind for N identical jobs"},
+			{Name: "repo", Type: String, Desc: "With kind and count: the repository for N identical jobs"},
+			{Name: "count", Type: Int, Desc: "With kind and repo: how many identical jobs, default 1"},
+			{Name: "memory_mb", Type: Int, Desc: "With kind and repo: memory per job in MB; omit for the learned estimate"},
+			{Name: "priority", Type: Int, Desc: "With kind and repo: priority per job, -100 to 100"},
+			{Name: "policy", Type: String, Desc: "With kind and repo: balanced, memory, performance, pack, spread or local-first"},
+		},
+	},
+	{
+		Name: "cluster.queue", MCP: "cluster_queue", CLI: []string{"cluster", "queue"},
+		Short: "Show waiting jobs in the order they will be tried, and why each waits",
+		Long: "Read-only. Every queued job in the order the next pass tries it, with its " +
+			"priority after ageing, how long it has waited, any worker held clear for it by " +
+			"the starvation guard, whether it fits right now, and the constraint holding it " +
+			"back on each worker. Smaller jobs behind a big one are still placed when they " +
+			"fit; the queue never blocks on its head.",
+	},
+	{
 		Name: "cluster.submit", MCP: "cluster_submit", CLI: []string{"cluster", "submit"},
 		Short: "Queue a coding agent to run on whichever machine suits it",
 		Long: "Queues one agent of the given kind in the given repository, with an " +
@@ -437,6 +482,20 @@ var All = []Verb{
 			"same text is served on cluster_metrics_addr when that is set to a " +
 			"loopback address. Nothing is sent anywhere.",
 	},
+}
+
+// PlanItems is the shape of one proposed job in cluster.plan.
+var PlanItems = []Arg{
+	{Name: "kind", Type: String, Desc: "Agent kind as Herdr names it: claude, codex, opencode, and so on", Required: true},
+	{Name: "repo", Type: String, Desc: "Repository directory on the worker, absolute or starting with ~/", Required: true},
+	{Name: "memory_mb", Type: Int, Desc: "Memory to reserve in MB; omit to use the learned estimate"},
+	{Name: "cpu", Type: String, Desc: "CPU cores to reserve, for example 1 or 1.5"},
+	{Name: "priority", Type: Int, Desc: "-100 to 100; higher goes first"},
+	{Name: "policy", Type: String, Desc: "balanced, memory, performance, pack, spread or local-first"},
+	{Name: "machine", Type: String, Desc: "Pin to one worker by id or label"},
+	{Name: "labels", Type: String, Desc: "Comma-separated labels the worker must carry"},
+	{Name: "os", Type: String, Desc: "Required worker OS: darwin, linux or windows"},
+	{Name: "arch", Type: String, Desc: "Required worker architecture: arm64 or amd64"},
 }
 
 // ByName finds the verb a socket request names.

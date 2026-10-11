@@ -825,6 +825,12 @@ func TestTheStampMovesEvenWhenThereIsNoRunnerToFireWith(t *testing.T) {
 	if err := os.WriteFile(watched, []byte("two"), 0o600); err != nil {
 		t.Fatalf("change the watched file: %v", err)
 	}
+	// A filesystem with a coarse clock can give both writes the same mtime;
+	// move it on so the change is one a stamp can see.
+	later := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(watched, later, later); err != nil {
+		t.Fatalf("move the mtime on: %v", err)
+	}
 	d.runWatchers(ctx)
 
 	held, _ := d.Store.Trigger("inbox")
@@ -1068,6 +1074,9 @@ func TestASameSizeRewriteInsideOneMillisecondIsStillAChange(t *testing.T) {
 	after := look(watched)
 	if after.Size != before.Size {
 		t.Fatalf("the rewrite changed the size, so this case proves nothing: %d then %d", before.Size, after.Size)
+	}
+	if before.ModNS == after.ModNS {
+		t.Skipf("this filesystem's clock did not tick between the two writes, so no stamp could tell them apart")
 	}
 	if before.ModNS/1e6 != after.ModNS/1e6 {
 		t.Skipf("the two writes fell in different milliseconds, so this case proves nothing")

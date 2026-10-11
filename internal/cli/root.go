@@ -159,6 +159,7 @@ func buildVerb(v verbs.Verb, g *globals, run Runner) *cobra.Command {
 	// on the other door, and a verb spelled differently on the two doors is
 	// the one thing the registry exists to prevent.
 	objects := map[string]*string{}
+	lists := map[string]*string{}
 	for _, a := range v.Args {
 		if a.Positional {
 			continue
@@ -172,6 +173,8 @@ func buildVerb(v verbs.Verb, g *globals, run Runner) *cobra.Command {
 			ints[a.Name] = cmd.Flags().Int(a.Name, 0, a.Desc)
 		case verbs.Object:
 			objects[a.Name] = cmd.Flags().String(a.Name, "", a.Desc+` (one JSON object, e.g. '{"title":"nightly sweep"}')`)
+		case verbs.List:
+			lists[a.Name] = cmd.Flags().String(a.Name, "", a.Desc+` (one JSON array of objects, or @file to read it from a file)`)
 		}
 	}
 	// --follow is the CLI's own flag, not the registry's: it is a property of
@@ -222,6 +225,25 @@ func buildVerb(v verbs.Verb, g *globals, run Runner) *cobra.Command {
 					"--%s is one JSON object and %q is not one: %v", name, *p, err)
 			}
 			args[name] = fields
+		}
+		for name, p := range lists {
+			if !cmd.Flags().Changed(name) {
+				continue
+			}
+			text := *p
+			if strings.HasPrefix(text, "@") {
+				b, err := os.ReadFile(strings.TrimPrefix(text, "@"))
+				if err != nil {
+					return codes.Refusef(codes.Invalid, "--%s: %v", name, err)
+				}
+				text = string(b)
+			}
+			var items []any
+			if err := json.Unmarshal([]byte(text), &items); err != nil {
+				return codes.Refusef(codes.Invalid,
+					"--%s is one JSON array and this is not one: %v", name, err)
+			}
+			args[name] = items
 		}
 		req, err := g.request(v, args)
 		if err != nil {

@@ -33,7 +33,20 @@ const Title = "Herdr Sched"
 const Door = "mcp"
 
 // Instructions is what a caller reads before it picks a tool.
-const Instructions = "herdr-sched is the scheduler and trigger plugin for a Herdr fleet: a cron " +
+const Instructions = "SPREADING CODING AGENTS ACROSS MACHINES: this server also places coding agents " +
+	"on whichever computer saved in Herdr has room. Before starting more than one agent, call " +
+	"`cluster_status` to see each machine's free memory and room, then `cluster_plan` with the " +
+	"jobs you intend to run (kind, repo, optional memory_mb and priority, or kind, repo and count) " +
+	"to see which machine each would land on and which would queue. `cluster_plan`, " +
+	"`cluster_status`, `cluster_workers`, `cluster_queue`, `cluster_jobs` and `cluster_explain` " +
+	"only read and launch nothing. `cluster_submit` queues one real agent per call; the scheduler " +
+	"starts it when a machine passes every hard limit (memory kept free, pressure, CPU, load, " +
+	"disk, battery, thermal, max agents). Never try to get round a hard limit by pinning with " +
+	"`machine` or lowering `memory_mb` below what the agent really uses: a queued job is " +
+	"working as intended and starts on its own. Use `cluster_explain <job>` or `cluster_queue` " +
+	"to say why something waits, and ask the user before `cluster_drain`, `cluster_cancel` or " +
+	"`stop`. " +
+	"herdr-sched is also the scheduler and trigger plugin for a Herdr fleet: a cron " +
 	"schedule or an inbound trigger fires an action into the sibling plugins, as the principal " +
 	"the contract already names for it — `cron:<job id>` or `trigger:<id>` (§3.1), so the actor " +
 	"is on every event trail it writes. Everything is scoped to a project, the git root of the " +
@@ -93,7 +106,7 @@ func New(v string, call Caller, opt Options) *mcp.Server {
 		Name:        ServerName,
 		Title:       Title,
 		Version:     v,
-		Description: "Fire a schedule or an inbound trigger into the sibling Herdr plugins",
+		Description: "Place coding agents across the machines saved in Herdr, and fire schedules and triggers into the sibling Herdr plugins",
 	}, &mcp.ServerOptions{Instructions: Instructions})
 	for _, verb := range verbs.MCPTools() {
 		s.AddTool(tool(verb), handlerFor(verb, call, opt))
@@ -126,7 +139,23 @@ func tool(v verbs.Verb) *mcp.Tool {
 	props := map[string]any{}
 	var required []string
 	for _, a := range v.Args {
-		props[a.Name] = map[string]any{"type": jsonType(a.Type), "description": a.Desc}
+		prop := map[string]any{"type": jsonType(a.Type), "description": a.Desc}
+		if a.Type == verbs.List {
+			itemProps := map[string]any{}
+			var itemReq []string
+			for _, f := range a.Items {
+				itemProps[f.Name] = map[string]any{"type": jsonType(f.Type), "description": f.Desc}
+				if f.Required {
+					itemReq = append(itemReq, f.Name)
+				}
+			}
+			item := map[string]any{"type": "object", "properties": itemProps}
+			if len(itemReq) > 0 {
+				item["required"] = itemReq
+			}
+			prop["items"] = item
+		}
+		props[a.Name] = prop
 		if a.Required {
 			required = append(required, a.Name)
 		}
@@ -160,6 +189,8 @@ func jsonType(t string) string {
 		return "boolean"
 	case verbs.Object:
 		return "object"
+	case verbs.List:
+		return "array"
 	default:
 		return "string"
 	}

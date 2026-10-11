@@ -850,6 +850,45 @@ func CheckArg(v verbs.Verb, a verbs.Arg, raw any) error {
 		if _, ok := raw.(map[string]any); !ok {
 			return codes.Refusef(codes.Invalid, "%s wants %s as an object of named values", v.Name, a.Name)
 		}
+	case verbs.List:
+		items, ok := raw.([]any)
+		if !ok {
+			return codes.Refusef(codes.Invalid, "%s wants %s as a list of objects", v.Name, a.Name)
+		}
+		for i, it := range items {
+			m, ok := it.(map[string]any)
+			if !ok {
+				return codes.Refusef(codes.Invalid, "%s wants every entry of %s to be an object; entry %d is not", v.Name, a.Name, i+1)
+			}
+			for k := range m {
+				known := false
+				for _, f := range a.Items {
+					if f.Name == k {
+						known = true
+					}
+				}
+				if !known {
+					return codes.Refusef(codes.Invalid, "%s: entry %d of %s has no field named %q", v.Name, i+1, a.Name, k)
+				}
+			}
+			for _, f := range a.Items {
+				fv, present := m[f.Name]
+				if !present || fv == nil {
+					if f.Required {
+						return codes.Refusef(codes.Invalid, "%s: entry %d of %s needs %s", v.Name, i+1, a.Name, f.Name)
+					}
+					continue
+				}
+				if f.Type == verbs.String {
+					if _, isNum := fv.(float64); isNum && f.Name == "cpu" {
+						continue // a number of cores is fine written as a number
+					}
+				}
+				if err := CheckArg(v, f, fv); err != nil {
+					return err
+				}
+			}
+		}
 	default:
 		s, ok := raw.(string)
 		if !ok {

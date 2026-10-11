@@ -160,6 +160,13 @@ func (c *Coordinator) Targets(ctx context.Context) ([]Target, error) {
 // worker's probe to measure those process trees, which forces a fresh
 // probe of that worker.
 func (c *Coordinator) Workers(ctx context.Context, force bool, pids map[string][]int) ([]placement.Worker, error) {
+	return c.workersWith(ctx, force, pids, nil)
+}
+
+// workersWith is Workers with extra repository paths every probe must also
+// answer for, which is what a plan for repositories nothing has queued yet
+// needs. A cached reading that never looked for one of them is not reused.
+func (c *Coordinator) workersWith(ctx context.Context, force bool, pids map[string][]int, extra []string) ([]placement.Worker, error) {
 	targets, terr := c.Targets(ctx)
 	rows, err := c.L.Workers(ctx)
 	if err != nil {
@@ -169,6 +176,7 @@ func (c *Coordinator) Workers(ctx context.Context, force bool, pids map[string][
 	if err != nil {
 		return nil, err
 	}
+	paths = mergePaths(paths, extra)
 	out := make([]placement.Worker, len(targets))
 	sem := make(chan struct{}, max(1, c.Cfg.ProbeConcurrency))
 	var wg sync.WaitGroup
@@ -211,7 +219,7 @@ func (c *Coordinator) worker(ctx context.Context, t Target, row ledger.WorkerRow
 		w.State = placement.StateDisabled
 		w.Snapshot = prev.snap
 		return w
-	case !force && len(pids) == 0 && have && now.Sub(prev.at) < c.Cfg.ProbeTTL:
+	case !force && len(pids) == 0 && have && now.Sub(prev.at) < c.Cfg.ProbeTTL && covers(prev.snap, paths):
 		w.Snapshot, w.LatencyMS = prev.snap, prev.latency
 	case !force && row.BackoffUntil.After(now):
 		w.State = placement.StateBackoff
@@ -246,6 +254,37 @@ func (c *Coordinator) worker(ctx context.Context, t Target, row ledger.WorkerRow
 		w.State = placement.StateDraining
 	}
 	return w
+}
+
+// covers says whether a reading already answered for every path, so a job
+// naming a repository the last probe never looked for is checked rather than
+// assumed present.
+func covers(s resource.Snapshot, paths []string) bool {
+	if s.Backend == resource.BackendStatic {
+		return true // a declaration has no paths to ask about
+	}
+	for _, p := range paths {
+		if _, ok := s.Paths[p]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func mergePaths(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range append(append([]string{}, a...), b...) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // repoPaths is every repository a queued or active job names, so a probe
@@ -644,57 +683,9 @@ const MaxPromptChars = 100_000
 // Submit validates a request, estimates what it needs when the caller did
 // not say, checks that some worker could ever run it, and queues it.
 func (c *Coordinator) Submit(ctx context.Context, r SubmitRequest) (ledger.Job, []string, error) {
-	var notes []string
-	if _, ok := resource.AgentExecutables[r.Kind]; !ok {
-		return ledger.Job{}, nil, fmt.Errorf("unknown agent kind %q; one of %v", r.Kind, resource.AgentKinds())
-	}
-	if err := transport.ValidatePath(r.Repo); err != nil {
-		return ledger.Job{}, nil, fmt.Errorf("repository: %w", err)
-	}
-	if len(r.Prompt) > MaxPromptChars {
-		return ledger.Job{}, nil, fmt.Errorf("prompt is %d characters; the limit is %d", len(r.Prompt), MaxPromptChars)
-	}
-	for _, a := range r.AgentArgs {
-		if !argRe.MatchString(a) {
-			return ledger.Job{}, nil, fmt.Errorf("agent argument %q has characters outside [A-Za-z0-9._/:=,@+%%-]", a)
-		}
-	}
-	for _, l := range r.Labels {
-		if !labelRe.MatchString(l) {
-			return ledger.Job{}, nil, fmt.Errorf("label %q must be lower case letters, digits, dot, dash or underscore", l)
-		}
-	}
-	if r.Policy != "" {
-		if _, ok := placement.Policies[r.Policy]; !ok {
-			return ledger.Job{}, nil, fmt.Errorf("policy %q is not one of %v", r.Policy, placement.PolicyNames)
-		}
-	}
-	switch r.Isolation {
-	case "", IsolationAuto, IsolationWorktree, IsolationNone:
-	default:
-		return ledger.Job{}, nil, fmt.Errorf("isolation %q is not auto, worktree or none", r.Isolation)
-	}
-	if r.Priority < -100 || r.Priority > 100 {
-		return ledger.Job{}, nil, fmt.Errorf("priority must be between -100 and 100")
-	}
-	if r.MemoryMB < 0 || r.CPU < 0 {
-		return ledger.Job{}, nil, fmt.Errorf("memory and cpu cannot be negative")
-	}
-	source := "requested"
-	if r.MemoryMB == 0 {
-		mb, src, ok, err := c.L.Estimate(ctx, r.Kind, r.Repo, c.Cfg.HistoryHeadroomPct)
-		if err != nil {
-			return ledger.Job{}, nil, err
-		}
-		if ok {
-			r.MemoryMB, source = mb, src
-		} else {
-			r.MemoryMB, source = c.Cfg.DefaultMemoryMB, "default"
-		}
-		notes = append(notes, fmt.Sprintf("memory estimate %d MB (%s)", r.MemoryMB, source))
-	}
-	if r.CPU == 0 {
-		r.CPU = c.Cfg.DefaultCPU
+	r, source, notes, err := c.prepare(ctx, r)
+	if err != nil {
+		return ledger.Job{}, nil, err
 	}
 	pj := placement.Job{Kind: r.Kind, Repo: r.Repo, MemoryMB: r.MemoryMB, CPU: r.CPU, Policy: r.Policy, Machine: r.Machine, Labels: r.Labels, OS: r.OS, Arch: r.Arch}
 	workers, err := c.Workers(ctx, false, nil)
@@ -709,6 +700,65 @@ func (c *Coordinator) Submit(ctx context.Context, r SubmitRequest) (ledger.Job, 
 		Machine: r.Machine, Labels: r.Labels, OS: r.OS, Arch: r.Arch, Isolation: r.Isolation,
 		SubmittedBy: r.SubmittedBy, MaxAttempts: c.Cfg.MaxAttempts})
 	return job, notes, err
+}
+
+// prepare validates a request and fills in the memory and CPU estimates the
+// caller left out. Submit and Plan share it, so a plan refuses exactly what a
+// submit would.
+func (c *Coordinator) prepare(ctx context.Context, r SubmitRequest) (SubmitRequest, string, []string, error) {
+	var notes []string
+	if _, ok := resource.AgentExecutables[r.Kind]; !ok {
+		return r, "", nil, fmt.Errorf("unknown agent kind %q; one of %v", r.Kind, resource.AgentKinds())
+	}
+	if err := transport.ValidatePath(r.Repo); err != nil {
+		return r, "", nil, fmt.Errorf("repository: %w", err)
+	}
+	if len(r.Prompt) > MaxPromptChars {
+		return r, "", nil, fmt.Errorf("prompt is %d characters; the limit is %d", len(r.Prompt), MaxPromptChars)
+	}
+	for _, a := range r.AgentArgs {
+		if !argRe.MatchString(a) {
+			return r, "", nil, fmt.Errorf("agent argument %q has characters outside [A-Za-z0-9._/:=,@+%%-]", a)
+		}
+	}
+	for _, l := range r.Labels {
+		if !labelRe.MatchString(l) {
+			return r, "", nil, fmt.Errorf("label %q must be lower case letters, digits, dot, dash or underscore", l)
+		}
+	}
+	if r.Policy != "" {
+		if _, ok := placement.Policies[r.Policy]; !ok {
+			return r, "", nil, fmt.Errorf("policy %q is not one of %v", r.Policy, placement.PolicyNames)
+		}
+	}
+	switch r.Isolation {
+	case "", IsolationAuto, IsolationWorktree, IsolationNone:
+	default:
+		return r, "", nil, fmt.Errorf("isolation %q is not auto, worktree or none", r.Isolation)
+	}
+	if r.Priority < -100 || r.Priority > 100 {
+		return r, "", nil, fmt.Errorf("priority must be between -100 and 100")
+	}
+	if r.MemoryMB < 0 || r.CPU < 0 {
+		return r, "", nil, fmt.Errorf("memory and cpu cannot be negative")
+	}
+	source := "requested"
+	if r.MemoryMB == 0 {
+		mb, src, ok, err := c.L.Estimate(ctx, r.Kind, r.Repo, c.Cfg.HistoryHeadroomPct)
+		if err != nil {
+			return r, "", nil, err
+		}
+		if ok {
+			r.MemoryMB, source = mb, src
+		} else {
+			r.MemoryMB, source = c.Cfg.DefaultMemoryMB, "default"
+		}
+		notes = append(notes, fmt.Sprintf("memory estimate %d MB (%s)", r.MemoryMB, source))
+	}
+	if r.CPU == 0 {
+		r.CPU = c.Cfg.DefaultCPU
+	}
+	return r, source, notes, nil
 }
 
 // Explanation is why a job is where it is.

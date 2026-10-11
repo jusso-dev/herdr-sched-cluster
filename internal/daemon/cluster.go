@@ -214,6 +214,22 @@ func (d *Daemon) serveCluster(ctx context.Context, verb string, req protocol.Req
 		d.logf("%s queued cluster job %s (%s in %s)", req.Caller(), job.ID, job.Kind, job.Repo)
 		d.pumpSoon(c)
 		return encode(ClusterSubmitted{Job: job, Notes: notes}, nil)
+	case "cluster.status":
+		st, err := c.Status(ctx)
+		return encode(st, err)
+	case "cluster.queue":
+		q, err := c.Queue(ctx)
+		return encode(q, err)
+	case "cluster.plan":
+		reqs, err := planRequests(req)
+		if err != nil {
+			return nil, err
+		}
+		p, err := c.Plan(ctx, reqs)
+		if err != nil {
+			return nil, codes.Refusef(codes.Invalid, "%v", err)
+		}
+		return encode(p, nil)
 	case "cluster.jobs":
 		var states []string
 		for _, s := range strings.Split(str("state"), ",") {
@@ -278,6 +294,94 @@ func (d *Daemon) serveCluster(ctx context.Context, verb string, req protocol.Req
 		return encode(MetricsReport{Text: text}, err)
 	}
 	return nil, codes.Refusef(codes.Invalid, "verb %q is declared and not served", verb)
+}
+
+// planRequests reads cluster.plan's arguments: a jobs list, or kind, repo and
+// count for N identical jobs. Naming both is refused rather than merged, so
+// the caller is never left guessing which one was planned.
+func planRequests(req protocol.Request) ([]coord.SubmitRequest, error) {
+	caller := req.Caller()
+	list, hasList := req.Args["jobs"].([]any)
+	kind, _ := req.Args["kind"].(string)
+	repo, _ := req.Args["repo"].(string)
+	short := kind != "" || repo != ""
+	if hasList && short {
+		return nil, codes.Refusef(codes.Invalid, "cluster.plan takes jobs, or kind and repo with count, not both")
+	}
+	if !hasList && !short {
+		return nil, codes.Refusef(codes.Invalid, "cluster.plan needs jobs, or kind and repo (with an optional count)")
+	}
+	if short {
+		if kind == "" || repo == "" {
+			return nil, codes.Refusef(codes.Invalid, "cluster.plan needs both kind and repo")
+		}
+		count := 1
+		if raw, ok := req.Args["count"]; ok {
+			n, err := wholeNumber(raw)
+			if err != nil || n < 1 {
+				return nil, codes.Refusef(codes.Invalid, "count must be a whole number of at least 1")
+			}
+			count = n
+		}
+		if count > coord.MaxPlanJobs {
+			return nil, codes.Refusef(codes.Invalid, "count is %d; a plan takes at most %d jobs", count, coord.MaxPlanJobs)
+		}
+		one := map[string]any{"kind": kind, "repo": repo}
+		for _, k := range []string{"memory_mb", "priority", "policy"} {
+			if v, ok := req.Args[k]; ok {
+				one[k] = v
+			}
+		}
+		for i := 0; i < count; i++ {
+			list = append(list, one)
+		}
+	} else {
+		for _, k := range []string{"count", "memory_mb", "priority", "policy"} {
+			if _, ok := req.Args[k]; ok {
+				return nil, codes.Refusef(codes.Invalid, "%s goes inside each entry of jobs, not beside it", k)
+			}
+		}
+	}
+	var out []coord.SubmitRequest
+	for i, raw := range list {
+		m, _ := raw.(map[string]any)
+		s := func(k string) string { v, _ := m[k].(string); return strings.TrimSpace(v) }
+		r := coord.SubmitRequest{Kind: s("kind"), Repo: s("repo"), Policy: s("policy"), Machine: s("machine"),
+			OS: s("os"), Arch: s("arch"), SubmittedBy: caller}
+		if v, ok := m["memory_mb"]; ok {
+			n, err := wholeNumber(v)
+			if err != nil {
+				return nil, codes.Refusef(codes.Invalid, "entry %d: memory_mb must be a whole number", i+1)
+			}
+			r.MemoryMB = int64(n)
+		}
+		if v, ok := m["priority"]; ok {
+			n, err := wholeNumber(v)
+			if err != nil {
+				return nil, codes.Refusef(codes.Invalid, "entry %d: priority must be a whole number", i+1)
+			}
+			r.Priority = n
+		}
+		switch v := m["cpu"].(type) {
+		case float64:
+			r.CPU = v
+		case string:
+			if strings.TrimSpace(v) != "" {
+				f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+				if err != nil || f <= 0 {
+					return nil, codes.Refusef(codes.Invalid, "entry %d: cpu must be a positive number", i+1)
+				}
+				r.CPU = f
+			}
+		}
+		for _, l := range strings.Split(s("labels"), ",") {
+			if l = strings.TrimSpace(l); l != "" {
+				r.Labels = append(r.Labels, l)
+			}
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 func stringArg(req protocol.Request, k string) string { s, _ := req.Args[k].(string); return s }
