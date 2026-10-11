@@ -34,10 +34,13 @@ This file is updated in the same commit as the work it describes.
 
 | Item | Status |
 | --- | --- |
-| Hard constraints with reasons | not started |
-| Scoring factors and policy weight sets | not started |
-| Explanation output | not started |
-| Property tests: hard constraints never overridden by score | not started |
+| Hard constraints with readable reasons (`internal/cluster/placement`): state, pinning, OS, arch, labels, declared agents, repository missing, memory after margin, critical pressure, CPU commit, sustained load, agent cap, disk, battery, thermal, starvation hold | done |
+| Scoring factors and six policy presets (`balanced`, `memory`, `performance`, `pack`, `spread`, `local-first`) | done |
+| Explanation: per-worker reasons, warnings, factors, score and a one-line summary | done |
+| Property test: a hard constraint is never overridden by a score (5,000 random clusters) | done |
+| Property test: placement is deterministic under reordering | done |
+| Property test: scores within 0..100, factors within 0..1 | done |
+| Starvation helper (`Nearest`) and submit-time feasibility (`FitsAnywhereEver`) | done |
 
 ## Phase 4: ledger and queue
 
