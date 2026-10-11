@@ -35,7 +35,8 @@ fi
 # where Enter is still needed and Esc cannot be seen.
 saved_tty=$(stty -g 2>/dev/null || true)
 restore_tty() { [ -n "$saved_tty" ] && stty "$saved_tty" 2>/dev/null; }
-trap 'restore_tty' EXIT INT TERM
+trap 'restore_tty' EXIT
+trap 'restore_tty; exit 130' INT TERM
 raw=0
 if [ -n "$saved_tty" ] && stty -icanon -echo min 0 time 0 2>/dev/null; then
   raw=1
@@ -57,6 +58,18 @@ next_key() {
   fi
   started=$(date +%s)
   key=""
+  if [ ! -t 0 ]; then
+    # Input is a pipe or a file, not a person: read a line without a timeout
+    # (dash has no `read -t`), and stop at end of input rather than redrawing
+    # forever for nobody.
+    if ! read -r key; then
+      [ -n "$key" ] && { printf '%s' "$key"; return 0; }
+      printf 'q'
+      return 0
+    fi
+    printf '%s' "$key"
+    return 0
+  fi
   if ! read -r -t "$1" key 2>/dev/null; then
     # EOF behind a partial line still delivered a key: hand it over now
     # rather than sleeping an interval on input that has already arrived.

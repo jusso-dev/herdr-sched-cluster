@@ -88,7 +88,7 @@ func DefaultConfig() Config {
 		DispatchTimeout:    60 * time.Second,
 		DispatchGrace:      5 * time.Minute,
 		Isolation:          IsolationAuto,
-		ProbeProgram:       "hsched",
+		ProbeProgram:       "~/.local/bin/hsched",
 		IncludeLocal:       true,
 		Defaults:           placement.DefaultSettings(),
 		Workers:            map[string]WorkerConfig{},

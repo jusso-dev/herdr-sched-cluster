@@ -353,7 +353,9 @@ func (l *Ledger) SetWorkspace(ctx context.Context, jobID, token, workspace, pane
 // MarkRunning records a started agent.
 func (l *Ledger) MarkRunning(ctx context.Context, jobID, token, pane string) error {
 	return l.tx(ctx, func(tx *sql.Tx) error {
-		set := `, started_at=?`
+		// A failed earlier attempt stays on the event trail; on the job row
+		// it would read as if the running agent were in trouble.
+		set := `, started_at=?, last_error=''`
 		args := []any{l.ms()}
 		if pane != "" {
 			set += `, pane_id=?`

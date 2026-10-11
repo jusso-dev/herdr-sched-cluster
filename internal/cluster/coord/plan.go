@@ -31,19 +31,22 @@ const (
 
 // PlannedJob is one proposed job and what would happen to it.
 type PlannedJob struct {
-	Index          int                 `json:"index"`
-	Ref            string              `json:"ref"`
-	Kind           string              `json:"kind"`
-	Repo           string              `json:"repo"`
-	MemoryMB       int64               `json:"memory_mb"`
-	CPU            float64             `json:"cpu"`
-	Priority       int                 `json:"priority"`
-	EstimateSource string              `json:"estimate_source,omitempty"`
-	Outcome        string              `json:"outcome"`
-	Worker         string              `json:"worker,omitempty"`
-	WorkerLabel    string              `json:"worker_label,omitempty"`
-	Reason         string              `json:"reason"`
-	Decision       *placement.Decision `json:"decision,omitempty"`
+	Index          int     `json:"index"`
+	Ref            string  `json:"ref"`
+	Kind           string  `json:"kind"`
+	Repo           string  `json:"repo"`
+	MemoryMB       int64   `json:"memory_mb"`
+	CPU            float64 `json:"cpu"`
+	Priority       int     `json:"priority"`
+	EstimateSource string  `json:"estimate_source,omitempty"`
+	Outcome        string  `json:"outcome"`
+	Worker         string  `json:"worker,omitempty"`
+	WorkerLabel    string  `json:"worker_label,omitempty"`
+	Reason         string  `json:"reason"`
+	// Warnings are the chosen worker's soft concerns, such as the agent not
+	// being on the PATH the probe saw. They do not stop placement.
+	Warnings []string            `json:"warnings,omitempty"`
+	Decision *placement.Decision `json:"decision,omitempty"`
 }
 
 // PlanWorker is one worker's share of a plan.
@@ -161,6 +164,11 @@ func (c *Coordinator) Plan(ctx context.Context, reqs []SubmitRequest) (Plan, err
 		pj.Outcome, pj.Worker, pj.Decision = PlanPlaced, a.WorkerID, &d
 		pj.WorkerLabel = byWorker[a.WorkerID].Label
 		pj.Reason = d.Summary
+		for _, cand := range d.Candidates {
+			if cand.WorkerID == a.WorkerID {
+				pj.Warnings = cand.Warnings
+			}
+		}
 		perWorker[a.WorkerID]++
 		usedMB[a.WorkerID] += pj.MemoryMB
 	}

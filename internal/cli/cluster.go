@@ -85,6 +85,9 @@ func writeCluster(verb string, result json.RawMessage, out io.Writer) error {
 				where = nameOr(j.WorkerLabel, j.Worker)
 			}
 			fmt.Fprintf(out, "%-8s %-13s %-12s %-8s %-28s %6dM  %s\n", j.Ref, j.Outcome, where, j.Kind, j.Repo, j.MemoryMB, j.Reason)
+			for _, w := range j.Warnings {
+				fmt.Fprintf(out, "         warning: %s\n", w)
+			}
 		}
 		fmt.Fprintln(out, "workers after this plan:")
 		for _, w := range p.Workers {

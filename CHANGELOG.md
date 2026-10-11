@@ -7,6 +7,43 @@ uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-11
+
+### Added
+
+- `cluster plan` (MCP `cluster_plan`): a read-only dry run of submitting a
+  batch, either a list of jobs or N identical ones. Per job it says
+  `would_place` and where, `would_queue` and why, or `would_refuse` and why.
+  It queues, reserves and starts nothing.
+- `cluster status` (MCP `cluster_status`): capacity and work in one answer,
+  with roughly how many more default-size agents fit on each worker.
+- `cluster queue` (MCP `cluster_queue`): waiting jobs in the order the next
+  pass tries them, with effective priority, wait time, holds and the reason.
+- `skills/herdr-cluster`: a skill and an `AGENTS.md` snippet telling a coding
+  agent when and how to spread work.
+- `setup-agents` Herdr action and `scripts/setup-agents.sh`: registers the MCP
+  server with Claude Code, Codex and OpenCode where they are installed.
+- `scripts/mcp-smoke.py`: talks to `hsched mcp` over stdio like an agent does.
+- Prebuilt release binaries for macOS and Linux on amd64 and arm64.
+
+### Changed
+
+- The `[[build]]` step is now `scripts/build.sh`: it compiles with Go when Go
+  is installed and otherwise downloads the release asset for this version and
+  checks its SHA-256, so Go is no longer required.
+- `start.sh` keeps a stable copy of the binary in the plugin state directory
+  and links `~/.local/bin/hsched` to it, since Herdr installs every update in
+  a new directory.
+- `cluster_probe_program` defaults to `~/.local/bin/hsched`.
+- The MCP server's instructions now lead with how to spread agents.
+- A cached probe is not reused for a repository it never checked.
+- A job that starts running clears the error from an earlier failed attempt.
+- `doctor` names an orphan store directory only when a store is actually there.
+
+### Fixed
+
+- The README told you to run `herdr plugin root`, which Herdr does not have.
+
 ## [0.3.0] - 2026-10-11
 
 First release of herdr-sched-cluster, a derivative of herdr-sched 0.2.4.

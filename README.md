@@ -24,73 +24,115 @@ in [docs/IMPLEMENTATION-CHECKLIST.md](docs/IMPLEMENTATION-CHECKLIST.md).
 
 ## Install
 
-You need Herdr 0.9.2 or later on every machine, Go 1.26 or later where the
-plugin is built, and key-based SSH from the coordinator (the machine you
-submit from) to each worker.
+You need Herdr 0.9.2 or later on every machine and key-based SSH from the
+coordinator (the machine you submit from) to each worker. Go is optional: with
+Go installed the plugin is compiled from source, and without it the matching
+prebuilt binary is downloaded from this repository's releases and checked
+against `checksums.txt`. Prebuilt binaries exist for macOS on Apple Silicon and
+Intel, and Linux on x86-64 and ARM64.
 
-On every machine, coordinator and workers alike:
+These steps were run end to end against Herdr 0.9.3 on Linux x86-64. On every
+machine, coordinator and workers alike:
 
 ```sh
 herdr plugin install jusso-dev/herdr-sched-cluster
 ```
 
-Herdr runs the manifest's `[[build]]` step, which compiles `./cmd/hsched` into
-`./bin/hsched` inside the installed plugin directory. The `[[startup]]` step
-runs `./scripts/start.sh`, which brings the daemon up detached. The plugin id
-is still `herdr-sched` and the binary is still `hsched`, so this replaces the
-upstream plugin rather than sitting beside it: if you have upstream
-herdr-sched installed, run `herdr plugin uninstall herdr-sched` first. Your
-existing cron jobs and triggers are kept, because the store format is
-unchanged.
-
-The coordinator probes each worker by running `hsched cluster probe --json`
-over SSH. A non-interactive SSH session usually has a short `PATH`
-(`/usr/bin:/bin:/usr/sbin:/sbin` on macOS), so on each worker put the binary
-somewhere fixed:
+Herdr shows a preview and asks before installing; add `--yes` to skip the
+question. The preview should say `id: herdr-sched`, `version: 0.4.0` and
+`build: ./scripts/build.sh`. Then start the daemon. A running Herdr server only
+runs startup hooks when it next starts, so either restart Herdr or run:
 
 ```sh
-mkdir -p ~/.local/bin
-ln -sf "$(herdr plugin root herdr-sched)/bin/hsched" ~/.local/bin/hsched
+herdr plugin action invoke herdr-sched.restart
 ```
 
-and on the coordinator tell the scheduler where that is, in
-`~/.config/sched/sched.toml`:
-
-```toml
-cluster_probe_program = "~/.local/bin/hsched"
-```
-
-The **skill symlink is not placed for you**. Ask Herdr for the plugin root
-and link the skill from there:
+Check it:
 
 ```sh
-ln -s "$(herdr plugin root herdr-sched)/skills/sched" ~/.claude/skills/sched
+hsched version                  # hsched 0.4.0 (herdr-sched)
+hsched doctor                   # socket, state and config paths, gate
+hsched cluster status           # every worker and how much room it has
 ```
 
-To develop against a checkout instead of an installed copy:
+If your shell cannot find `hsched`, add `~/.local/bin` to your `PATH`. Each
+time the daemon starts, `scripts/start.sh` copies the binary to
+`~/.local/state/herdr/plugins/herdr-sched/bin/hsched` and points
+`~/.local/bin/hsched` at it. Herdr installs every update into a new directory,
+so that link is the stable path for your shell, your agents' MCP config and
+the coordinator's SSH probe. A real file already at `~/.local/bin/hsched` is
+left alone; set `HSCHED_NO_LINK=1` to skip the link entirely.
+
+To force one way of getting the binary, set `HSCHED_BUILD=source` or
+`HSCHED_BUILD=prebuilt` in the environment you run `herdr plugin install` from.
+
+### Plugin name
+
+The plugin id is `herdr-sched` and the binary is `hsched`, the same as
+upstream herdr-sched. That is deliberate: this is a drop-in replacement, so
+your existing cron jobs, triggers and config in `~/.config/sched` and
+`~/.local/state/sched` carry straight over. The two cannot run side by side,
+because they would share one socket and one store. Installing this over
+upstream replaces it in place (the preview says `replaces: herdr-sched`); to
+be tidy, remove upstream first:
+
+```sh
+herdr plugin uninstall herdr-sched
+herdr plugin install jusso-dev/herdr-sched-cluster
+herdr plugin action invoke herdr-sched.restart
+```
+
+To remove this plugin, stop the daemon first, because Herdr has no shutdown
+hook:
+
+```sh
+herdr plugin action invoke herdr-sched.stop
+herdr plugin uninstall herdr-sched
+rm -f ~/.local/bin/hsched
+```
+
+Your store and config stay where they are. To go back to upstream, install
+`husniadil/herdr-sched` after that.
+
+### Upgrading
+
+Herdr 0.9.3 has no `plugin update` command, so run the install again, then
+restart the daemon:
+
+```sh
+herdr plugin install jusso-dev/herdr-sched-cluster --yes
+herdr plugin action invoke herdr-sched.restart
+```
+
+Newer Herdr releases also have `herdr plugin update herdr-sched`. The cluster
+ledger carries a schema version and is refused, not overwritten, by a binary
+that does not know it.
+
+### Developing
 
 ```sh
 git clone https://github.com/jusso-dev/herdr-sched-cluster
 cd herdr-sched-cluster
+make build
 herdr plugin link .
 ```
 
-Herdr has no shutdown hook, so disabling or unlinking the plugin leaves the
-daemon running. The `[[actions]]` entries are how it is actually turned off:
-**Stop the sched daemon** and **Restart the sched daemon**, both on the
-workspace context, running `./scripts/stop.sh` and `./scripts/restart.sh`.
-Configuration is read once at daemon start, so restart after editing it.
-
-### Upgrading
-
-`herdr plugin install jusso-dev/herdr-sched-cluster` again (or `git pull` in a
-linked checkout), then restart the daemon. The cluster ledger carries a
-schema version and is refused, not overwritten, by a binary that does not
-know it.
+`plugin link` does not run the build step, so build first. Herdr has no
+shutdown hook, so disabling or unlinking the plugin leaves the daemon running.
+The `[[actions]]` entries are how it is actually turned off: **Stop the sched
+daemon** and **Restart the sched daemon**. Configuration is read once at daemon
+start, so restart after editing it.
 
 ## Registering machines
 
-Workers are Herdr's saved machines. On the coordinator:
+Workers are Herdr's saved machines. Install the plugin on each worker as
+above, so `~/.local/bin/hsched` exists there: the coordinator probes a worker
+by running `~/.local/bin/hsched cluster probe --json` over SSH. If you keep
+`hsched` somewhere else on a worker, set `cluster_probe_program` in the
+coordinator's `~/.config/sched/sched.toml`, or `program` for that worker in
+`cluster-workers.json`.
+
+On the coordinator:
 
 ```sh
 herdr machine add mini            # follow Herdr's prompts for the SSH target
@@ -135,6 +177,11 @@ silently ignored.
 ## Running agents on the cluster
 
 ```sh
+# How much room is there, and where would ten agents go? Neither starts anything.
+hsched cluster status
+hsched cluster plan --kind claude --repo ~/src/app --count 10
+hsched cluster plan --jobs '[{"kind":"claude","repo":"~/src/app","priority":20},{"kind":"codex","repo":"~/src/api","memory_mb":4096}]'
+
 # Queue a Claude Code agent; the scheduler picks the machine.
 hsched cluster submit claude ~/src/app --prompt "Fix the failing date tests"
 
@@ -145,6 +192,7 @@ hsched cluster submit codex ~/src/api --memory_mb 8192 --policy memory --machine
 hsched cluster submit claude ~/src/app --isolation worktree --prompt "Try the refactor"
 
 hsched cluster jobs               # what is queued, running and done, and where
+hsched cluster queue              # waiting jobs in the order they will be tried, and why
 hsched cluster explain j12        # why j12 went where it did, or why it waits
 hsched cluster workers            # memory, pressure, CPU and reservations per machine
 hsched cluster drain mini         # no new agents on mini; running ones carry on
@@ -194,6 +242,87 @@ A big job that keeps losing to smaller ones is protected: once it has waited
 `cluster_starvation_minutes`, the worker nearest to fitting it is held clear
 for it, and small jobs that would fit elsewhere still run.
 
+## Letting your coding agent spread the work
+
+Herdr does not pass plugin tools to agents; plugins have no MCP hook. So each
+agent connects to the same `hsched mcp` server itself. The quickest way, once
+per machine, is the plugin's own action, which registers the server with
+whichever of Claude Code, Codex and OpenCode are installed and copies the
+skill for Claude Code:
+
+```sh
+herdr plugin action invoke herdr-sched.setup-agents
+```
+
+It is safe to run again. To do it by hand instead (use your own home directory
+in the paths; JSON and TOML do not expand `~`):
+
+Claude Code:
+
+```sh
+claude mcp add --scope user herdr-sched -- ~/.local/bin/hsched mcp
+mkdir -p ~/.claude/skills/herdr-cluster
+curl -fsSL https://raw.githubusercontent.com/jusso-dev/herdr-sched-cluster/main/skills/herdr-cluster/SKILL.md \
+  -o ~/.claude/skills/herdr-cluster/SKILL.md
+```
+
+The cron and trigger half has its own skill, `skills/sched`, which the action
+copies to `~/.claude/skills/sched` as well.
+
+Codex, either `codex mcp add herdr-sched -- ~/.local/bin/hsched mcp` or in
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.herdr-sched]
+command = "/Users/you/.local/bin/hsched"
+args = ["mcp"]
+```
+
+OpenCode, in `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "herdr-sched": {
+      "type": "local",
+      "command": ["/Users/you/.local/bin/hsched", "mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Check with `claude mcp list`, `codex mcp list` or `opencode mcp list`; each
+should show `herdr-sched` connected or enabled. All three were checked this way.
+
+Then tell the agent when to use it. Claude Code picks up the skill on its own.
+For Codex, OpenCode and anything else that reads `AGENTS.md`, paste
+[skills/herdr-cluster/AGENTS-snippet.md](skills/herdr-cluster/AGENTS-snippet.md)
+into your global or project `AGENTS.md`. After that you can say "spread these
+five fixes across my machines" and the agent will:
+
+1. call `cluster_status` to see free memory and room on each machine,
+2. call `cluster_plan` with the jobs it intends to run, which answers per job
+   `would_place` (and where), `would_queue` (and what it waits for) or
+   `would_refuse` (and why), without starting anything,
+3. submit each agent with `cluster_submit`, most important first or with a
+   higher `priority`,
+4. answer "why is that one waiting?" with `cluster_queue` or
+   `cluster_explain`.
+
+The read-only tools are `cluster_status`, `cluster_plan`, `cluster_workers`,
+`cluster_queue`, `cluster_jobs`, `cluster_explain`, `cluster_events` and
+`cluster_metrics`. The ones that change something are `cluster_submit`,
+`cluster_cancel`, `cluster_detach`, `cluster_drain` and `cluster_undrain`, and
+each can be held for your approval by the policy gate. The skill tells the
+agent never to get round a hard limit by pinning work to a full machine or
+understating memory, and to ask before draining or cancelling.
+
+To try the MCP server by hand, `scripts/mcp-smoke.py` speaks JSON-RPC over
+stdio the way an agent's client does: it lists the tools and calls
+`cluster_status` and `cluster_plan`.
+
 ## Cron jobs, triggers and the two doors
 
 Everything below this point is upstream herdr-sched's behaviour, kept as it
@@ -232,7 +361,8 @@ It registers as `herdr-sched` and serves the verbs under their bare names -
 `job_add`, `job_list`, `job_remove`, `job_enable`, `job_disable`,
 `trigger_add`, `trigger_list`, `trigger_remove`, `trigger_enable`,
 `trigger_disable`, `doctor`, `dump`, `events`, `parked_list`,
-`parked_resolve`, `stop`, and the cluster tools `cluster_workers`,
+`parked_resolve`, `stop`, and the cluster tools `cluster_status`,
+`cluster_plan`, `cluster_queue`, `cluster_workers`,
 `cluster_submit`, `cluster_jobs`, `cluster_explain`, `cluster_cancel`,
 `cluster_detach`, `cluster_drain`, `cluster_undrain`, `cluster_events` and
 `cluster_metrics`, so a
@@ -631,7 +761,7 @@ cluster_tick_seconds = 15              # how often to reconcile, measure and dis
 cluster_policy = "balanced"            # balanced, memory, performance, pack, spread, local-first
 cluster_include_local = true           # schedule onto this computer as the worker "local"
 cluster_isolation = "auto"             # auto, worktree or none
-cluster_probe_program = "hsched"       # the hsched a worker runs for the probe, e.g. "~/.local/bin/hsched"
+cluster_probe_program = "~/.local/bin/hsched"  # the hsched a worker runs for the probe
 cluster_probe_ttl_seconds = 20         # reuse a reading this long before probing again
 cluster_probe_timeout_seconds = 20     # give up on one SSH probe after this
 cluster_dispatch_timeout_seconds = 60  # how long agent start waits for the agent to be ready
@@ -787,6 +917,14 @@ Be clear about what this does not do yet:
   restarts, so it is not relied on.
 - **Repository paths must match across machines** (or be under `~/` with the
   same layout). There is no per-worker path mapping yet.
+- **A plan is a snapshot.** `cluster plan` uses the same readings and rules
+  as a real pass, but memory moves, so a job planned to start now can still
+  queue a few seconds later, and the other way round.
+- **Worktrees need a commit.** When a second agent shares a repository on a
+  machine, it gets a Herdr worktree, and Git cannot make one in a repository
+  with no commits yet. The job goes back to the queue with that error and
+  starts once the repository has a commit. Worktrees are left in place when
+  the agent finishes, since they hold its work.
 - **Prometheus metrics are a text endpoint and a CLI verb only.** There is no
   bundled Grafana dashboard.
 - **GitHub Actions CI** is described in [docs/ci/ci.yml](docs/ci/ci.yml) but

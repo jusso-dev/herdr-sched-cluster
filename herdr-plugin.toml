@@ -32,6 +32,16 @@ title = "Restart the sched daemon"
 contexts = ["workspace"]
 command = ["./scripts/restart.sh"]
 
+# Registers the MCP server with Claude Code, Codex and OpenCode where they are
+# installed, and installs the herdr-cluster skill for Claude Code. It changes
+# those agents' own config files, so it is an action the user invokes rather
+# than something install or startup does behind their back.
+[[actions]]
+id = "setup-agents"
+title = "Connect Claude Code, Codex and OpenCode to the cluster scheduler"
+contexts = ["workspace"]
+command = ["./scripts/setup-agents.sh"]
+
 # A pane that dies is news this plugin will need the moment a job or a trigger
 # can be bound to one, and the hook is wired from day one so that change is a
 # verb rather than a manifest edit an operator has to re-install for. Both

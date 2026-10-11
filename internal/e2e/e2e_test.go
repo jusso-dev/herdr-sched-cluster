@@ -626,9 +626,10 @@ func TestTheDashboardSaysSoWhenTheDaemonRefuses(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		missing(t, "the dashboard needs jq and it is not on PATH: %v", err)
 	}
-	// Past the ~104-byte sun_path limit, so the daemon exits rather than
-	// listens and every call answers with the §6.2 error document.
-	tooLong := filepath.Join("/tmp", strings.Repeat("d", 90))
+	// Past the sun_path limit (104 bytes on macOS, 108 on Linux), so the
+	// daemon exits rather than listens and every call answers with the §6.2
+	// error document.
+	tooLong := filepath.Join("/tmp", strings.Repeat("d", 110))
 	if err := os.MkdirAll(tooLong, 0o700); err != nil {
 		t.Fatalf("mkdir the over-long state dir: %v", err)
 	}

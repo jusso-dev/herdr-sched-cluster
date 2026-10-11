@@ -83,16 +83,53 @@ This file is updated in the same commit as the work it describes.
 
 | Item | Status |
 | --- | --- |
-| Cluster verbs on both doors (CLI and MCP) through the registry | done: `cluster workers`, `submit`, `jobs`, `explain`, `cancel`, `detach`, `drain`, `undrain`, `events`, `metrics`; mutating ones gated as `sched.cluster.*`; parity tests pin the tool list |
+| Cluster verbs on both doors (CLI and MCP) through the registry | done: `cluster status`, `plan`, `queue`, `workers`, `submit`, `jobs`, `explain`, `cancel`, `detach`, `drain`, `undrain`, `events`, `metrics`; mutating ones gated as `sched.cluster.*`; parity tests pin the tool list; a daemon test fails any cluster verb that is declared but not routed |
 | Daemon integration | done: own tick (`cluster_tick_seconds`), a pump straight after each submit, ledger at `<state dir>/cluster.db`; a bad cluster config turns only the cluster off, with the reason in every cluster verb's refusal |
 | Config reference for the `cluster_*` keys | done: 25 flat keys in `sched.toml` (the upstream parser has no tables) plus `cluster-workers.json` for per-worker settings; unknown fields refused; README test checks every key is documented |
 | Prometheus metrics | done: `hsched cluster metrics` and an optional loopback-only `/metrics` (`cluster_metrics_addr`) |
 | Dashboard popup | done: the existing popup gains cluster workers and jobs (read-only verbs, checked by the manifest test) |
 | README for people: install, register machines, config, CLI, limitations | done |
-| Install and upgrade steps | done (README); not exercised against a real Herdr install here, since this box has no Herdr |
-| End-to-end check of the real binary | done on Linux with a stand-in `herdr` script: daemon start, `cluster workers`, `submit`, dispatch, `jobs`, `explain`, `metrics`, file modes `0600`/`0700`, prompt absent from logs. Not run against a real Herdr or a real second machine |
+| Install and upgrade steps | done, run against real Herdr 0.9.3 on Linux x86-64: `herdr plugin install jusso-dev/herdr-sched-cluster` from GitHub, both the source build and the prebuilt release download, the startup hook, the restart action, reinstall as upgrade |
+| End-to-end check of the real binary | done on Linux against real Herdr 0.9.3 with one local worker: daemon from the startup hook, `cluster status`, `plan`, `workers`, `submit` of two real OpenCode agents (the second in a Herdr worktree), `jobs`, `queue`, `explain`, a finished agent reconciled, the CLI run from inside a Herdr pane, and the MCP server over stdio. Not run on a real second machine or on macOS |
 | CI on Linux and macOS | not enabled: the publishing token lacks GitHub's `workflow` scope. The workflow is in `docs/ci/ci.yml` with the two commands to enable it |
-| Upstream tests | pass, except two upstream file-watcher tests that also fail on unmodified upstream on this box (overlayfs mtime granularity); upstream CI was green |
+| Upstream tests | pass. Two upstream file-watcher tests assumed a filesystem clock finer than two back-to-back writes; one now moves the mtime on explicitly and the other skips when the clock did not tick |
+
+## Phase 8: installable and agent-usable
+
+| Item | Status |
+| --- | --- |
+| Install from GitHub with real Herdr's loader | done (Herdr 0.9.3; see above). `herdr plugin root` and `herdr plugin update` do not exist in 0.9.3, so the README no longer uses them |
+| Build without Go | done: `scripts/build.sh` compiles with Go when present, otherwise downloads the release asset for the manifest version and checks its SHA-256 |
+| Stable `hsched` path across updates | done: `start.sh` copies the binary to the plugin state dir and links `~/.local/bin/hsched`; `cluster_probe_program` now defaults to that path |
+| Read-only `cluster plan` (N jobs, no dispatch, per-job outcome and reason) | done, with a test that a plan matches what submit then does |
+| `cluster status` and `cluster queue` | done |
+| MCP instructions aimed at agents | done |
+| Agent skill and `AGENTS.md` snippet | done (`skills/herdr-cluster`) |
+| Registration with Claude Code, Codex, OpenCode | done: `setup-agents` action; each agent's `mcp list` checked against the real binary |
+| MCP over stdio with a JSON-RPC client | done (`scripts/mcp-smoke.py`) |
+
+## Brief gap check (sections 3.3 to 12)
+
+This check is against the section topics of the brief. The full text of those
+sections was not available to this build either (the copy was truncated a
+second time), so anything below marked against a topic, not a requirement, is
+for Justin to confirm.
+
+| Topic | Status |
+| --- | --- |
+| Adaptive estimation | partial: memory learned per agent kind and repository (EWMA of observed peak RSS, with headroom), used when `memory_mb` is omitted, in both submit and plan. CPU is not learned; it uses `cluster_default_cpu` or the request |
+| Example scenario (ten agents on the MacBook Pro and Mac mini) | done in simulation (scenario 1 and `TestPlanMatchesWhatSubmitThenDoes`); not run on the real Macs |
+| Worker architecture | done as a design choice: no worker daemon. The coordinator probes each worker over SSH with `hsched cluster probe` and drives Herdr with `herdr --machine`. A worker only needs the plugin installed |
+| Agent lifecycle | partial: queued, reserved, dispatching, running, finished, failed, cancelled, detached. A worker Herdr restart is recorded as finished, not lost |
+| Workspace and Git isolation | partial: automatic Herdr worktree when a repository is already busy on that machine, or on request. Fails on a repository with no commits (the job requeues). Worktrees are not cleaned up after the agent finishes |
+| Queue: head-of-line blocking | done: backfill places smaller jobs past a blocked head; the starvation guard holds a worker clear for a job that has waited too long |
+| Queue: reason output | done: `cluster queue` (new) and `cluster explain` |
+| Load balancing | done: six policies over the same hard limits |
+| Memory pressure protection | done: critical pressure is a hard limit, elevated pressure and swapping are warnings, overruns raise the reservation. Nothing is killed |
+| Herdr integration CLI | partial: Herdr has no way for a plugin to add `herdr` subcommands, so the CLI is `hsched cluster ...`, plus Herdr actions (dashboard, restart, stop, setup-agents) |
+| Observability | done: `explain`, `queue`, `events`, `metrics` (Prometheus text, optional loopback endpoint), dashboard popup |
+| Security | done: fixed SSH argv with an allow-list, `0600` ledger, prompts never logged, loopback-only metrics, mutating verbs behind the policy gate |
+| Configuration | done: `cluster_*` keys in `sched.toml` and `cluster-workers.json`, all documented and validated |
 
 ## Known gaps
 
@@ -101,5 +138,7 @@ This file is updated in the same commit as the work it describes.
 - A worker Herdr restart is recorded as `finished`, not `lost`.
 - `herdr machine status` is read by the adapter but not used for placement.
 - No per-worker repository path mapping.
-- No end-to-end run against real Herdr servers on two machines.
-- Sections 3.3 to 13 of the brief were truncated in the copy this work started from; see GAP-ANALYSIS section 7.
+- No end-to-end run against real Herdr servers on two machines, or on macOS.
+- CPU use is not learned from history.
+- Worktrees are not cleaned up, and cannot be made in a repository with no commits.
+- Sections 3.3 to 12 of the brief were truncated in every copy this work has seen; the check above is against their topics. See GAP-ANALYSIS section 7.
