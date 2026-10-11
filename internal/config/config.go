@@ -122,6 +122,12 @@ func OrphanStoreDirs() []string {
 		if dir == "" || dir == inUse {
 			return
 		}
+		// Only a directory that actually holds a store is worth naming. The
+		// plugin's own state dir also holds the stable copy of the binary
+		// start.sh keeps there, which is not a second store.
+		if _, err := os.Stat(filepath.Join(dir, Name+".json")); err != nil {
+			return
+		}
 		for _, seen := range out {
 			if seen == dir {
 				return

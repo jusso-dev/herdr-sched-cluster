@@ -12,6 +12,7 @@ import (
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/ledger"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/sim"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/codes"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/verbs"
 )
 
 func clusterDaemon(t *testing.T) (*Daemon, *sim.Cluster) {
@@ -130,5 +131,70 @@ func TestClusterOffRefusesWithTheReason(t *testing.T) {
 	d.Cluster = nil
 	if _, err := call(t, d, "cluster.jobs", nil); err == nil {
 		t.Fatal("answered without a cluster")
+	}
+}
+
+// Every cluster verb the registry declares is one the daemon serves. A verb
+// that is declared and routed nowhere passes every unit test of its own logic
+// and fails the first real call.
+func TestEveryClusterVerbIsServed(t *testing.T) {
+	d, _ := clusterDaemon(t)
+	for _, v := range verbs.All {
+		if !strings.HasPrefix(v.Name, "cluster.") {
+			continue
+		}
+		_, err := call(t, d, v.Name, map[string]any{})
+		if err != nil && strings.Contains(err.Error(), "declared and not served") {
+			t.Errorf("%s: %v", v.Name, err)
+		}
+	}
+}
+
+func TestClusterPlanStatusAndQueueOverTheDaemon(t *testing.T) {
+	d, cl := clusterDaemon(t)
+	raw, err := call(t, d, "cluster.plan", map[string]any{"kind": "claude", "repo": "~/src/app", "count": float64(10), "memory_mb": float64(8192)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p coord.Plan
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Jobs) != 10 || p.Placed == 0 || p.Queued == 0 {
+		t.Fatalf("%s", raw)
+	}
+	if cl.Live("mbp")+cl.Live("mini") != 0 {
+		t.Fatal("plan launched an agent")
+	}
+	raw, err = call(t, d, "cluster.plan", map[string]any{"jobs": []any{
+		map[string]any{"kind": "codex", "repo": "~/src/a", "memory_mb": float64(4096), "priority": float64(10)},
+		map[string]any{"kind": "claude", "repo": "~/src/b", "cpu": 2.0},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &p); err != nil || len(p.Jobs) != 2 || p.Jobs[1].CPU != 2 {
+		t.Fatalf("%s %v", raw, err)
+	}
+	for name, args := range map[string]map[string]any{
+		"neither":      {},
+		"both":         {"kind": "claude", "repo": "~/x", "jobs": []any{map[string]any{"kind": "claude", "repo": "~/x"}}},
+		"no repo":      {"kind": "claude"},
+		"bad field":    {"jobs": []any{map[string]any{"kind": "claude", "repo": "~/x", "prompt": "hi"}}},
+		"not a list":   {"jobs": "claude"},
+		"count beside": {"jobs": []any{map[string]any{"kind": "claude", "repo": "~/x"}}, "count": float64(2)},
+		"huge":         {"kind": "claude", "repo": "~/x", "count": float64(1000)},
+	} {
+		if _, err := call(t, d, "cluster.plan", args); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	raw, err = call(t, d, "cluster.status", nil)
+	if err != nil || !strings.Contains(string(raw), `"room_for_default_agents"`) {
+		t.Fatalf("%s %v", raw, err)
+	}
+	raw, err = call(t, d, "cluster.queue", nil)
+	if err != nil || !strings.Contains(string(raw), `"count":0`) {
+		t.Fatalf("%s %v", raw, err)
 	}
 }

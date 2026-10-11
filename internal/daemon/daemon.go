@@ -383,7 +383,7 @@ func (d *Daemon) serve(ctx context.Context, v verbs.Verb, req protocol.Request) 
 		return encode(d.listParked(req))
 	case "parked.resolve":
 		return encode(d.resolveParked(ctx, req))
-	case "cluster.workers", "cluster.submit", "cluster.jobs", "cluster.explain", "cluster.cancel",
+	case "cluster.workers", "cluster.status", "cluster.plan", "cluster.queue", "cluster.submit", "cluster.jobs", "cluster.explain", "cluster.cancel",
 		"cluster.detach", "cluster.drain", "cluster.undrain", "cluster.events", "cluster.metrics":
 		return d.serveCluster(ctx, v.Name, req)
 	case "stop":
