@@ -44,16 +44,19 @@ func TestEveryHardConstraintExcludes(t *testing.T) {
 		t.Fatalf("base should be eligible: %v", r)
 	}
 	cases := map[string]func(w *Worker){
-		"draining":        func(w *Worker) { w.State = StateDraining },
-		"unreachable":     func(w *Worker) { w.State = StateUnreachable },
-		"memory":          func(w *Worker) { w.Snapshot.Memory.AvailableMB = 5000 },
-		"pending memory":  func(w *Worker) { w.PendingMemoryMB = 15000 },
-		"pressure":        func(w *Worker) { w.Snapshot.Memory.Pressure = resource.PressureCritical },
-		"cpu commit":      func(w *Worker) { w.CommittedCPU = 7.5 },
-		"load":            func(w *Worker) { w.Snapshot.CPU.Load5 = 40 },
-		"max agents":      func(w *Worker) { w.Settings.MaxAgents = 2; w.ActiveAgents = 2 },
-		"disk":            func(w *Worker) { w.Snapshot.Disk.FreeGB = 1 },
-		"battery":         func(w *Worker) { w.Settings.MinBatteryPct = 30; w.Snapshot.Power = resource.Power{Source: resource.PowerBattery, BatteryPct: 10} },
+		"draining":       func(w *Worker) { w.State = StateDraining },
+		"unreachable":    func(w *Worker) { w.State = StateUnreachable },
+		"memory":         func(w *Worker) { w.Snapshot.Memory.AvailableMB = 5000 },
+		"pending memory": func(w *Worker) { w.PendingMemoryMB = 15000 },
+		"pressure":       func(w *Worker) { w.Snapshot.Memory.Pressure = resource.PressureCritical },
+		"cpu commit":     func(w *Worker) { w.CommittedCPU = 7.5 },
+		"load":           func(w *Worker) { w.Snapshot.CPU.Load5 = 40 },
+		"max agents":     func(w *Worker) { w.Settings.MaxAgents = 2; w.ActiveAgents = 2 },
+		"disk":           func(w *Worker) { w.Snapshot.Disk.FreeGB = 1 },
+		"battery": func(w *Worker) {
+			w.Settings.MinBatteryPct = 30
+			w.Snapshot.Power = resource.Power{Source: resource.PowerBattery, BatteryPct: 10}
+		},
 		"thermal":         func(w *Worker) { w.Snapshot.Thermal = resource.ThermalCritical },
 		"label":           func(w *Worker) { w.Settings.Labels = nil },
 		"declared agents": func(w *Worker) { w.Settings.Agents = []string{"codex"} },

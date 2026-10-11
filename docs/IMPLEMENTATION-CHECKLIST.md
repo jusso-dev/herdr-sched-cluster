@@ -46,11 +46,13 @@ This file is updated in the same commit as the work it describes.
 
 | Item | Status |
 | --- | --- |
-| SQLite ledger, `0600`, schema migrations | not started |
-| Atomic reserve with guarded state transitions | not started |
-| Queue ordering, priority ageing, backfill, starvation guard | not started |
-| Cancellation | not started |
-| Property tests: no reservation consumed twice, no double dispatch | not started |
+| SQLite ledger, `0600`, schema migrations | done (`internal/cluster/ledger`, pure Go `modernc.org/sqlite`, WAL; refuses a file other users can read; schema version 1) |
+| Atomic reserve with guarded state transitions | done (capacity check runs inside an `IMMEDIATE` transaction; every later transition needs the reservation token) |
+| Queue ordering, priority ageing, backfill, starvation guard | done (`internal/cluster/queue`) |
+| Cancellation | done for queued and reserved jobs; running jobs are refused, since we never kill agents |
+| Property tests: no reservation consumed twice | done (16 goroutines over two handles on one file, five seeded rounds, under `-race`) |
+| Property test: a queue pass never overcommits or assigns a job twice | done |
+| Property test: no double dispatch end to end | see phase 5 (needs the dispatcher) |
 
 ## Phase 5: multi-machine dispatch
 
