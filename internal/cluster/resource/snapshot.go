@@ -74,6 +74,9 @@ type Snapshot struct {
 	// Processes are samples for the PIDs the caller asked about, each with its
 	// descendants folded in.
 	Processes []ProcSample `json:"processes,omitempty"`
+	// Home is the probing user's home directory, so a repository given as
+	// ~/src/app can be opened at the right absolute path on this machine.
+	Home string `json:"home,omitempty"`
 	// Warnings are things the collector could not read. A missing reading is
 	// reported, never invented.
 	Warnings []string `json:"warnings,omitempty"`

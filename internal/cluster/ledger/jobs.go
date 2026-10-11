@@ -418,6 +418,29 @@ func (l *Ledger) DispatchFailed(ctx context.Context, jobID, token, reason string
 	return to, err
 }
 
+// Abandon fails a reserved or dispatching job without retrying it. It is
+// used when an agent start may or may not have happened and the agent can
+// no longer be found: running the job a second time is worse than asking
+// the operator to resubmit it.
+func (l *Ledger) Abandon(ctx context.Context, jobID, token, reason string) error {
+	return l.tx(ctx, func(tx *sql.Tx) error {
+		var state string
+		if err := tx.QueryRowContext(ctx, `SELECT state FROM jobs WHERE id=?`, jobID).Scan(&state); err != nil {
+			return err
+		}
+		if state != Reserved && state != Dispatching {
+			return ErrConflict
+		}
+		if err := l.move(ctx, tx, jobID, token, state, Failed, `, last_error=?, finished_at=?`, truncate(reason, 500), l.ms()); err != nil {
+			return err
+		}
+		if err := l.release(ctx, tx, jobID); err != nil {
+			return err
+		}
+		return event(ctx, tx, l.ms(), "cluster.job.abandoned", jobID, "", map[string]any{"reason": truncate(reason, 500)})
+	})
+}
+
 // Finish ends a running job: its agent is gone (finished), its worker's
 // Herdr restarted and took it (lost), or the operator stopped tracking it
 // (detached). The reservation is released and what the agent used is

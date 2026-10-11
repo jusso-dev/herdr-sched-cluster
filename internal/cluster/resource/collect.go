@@ -38,6 +38,7 @@ func Collect(ctx context.Context, req Request) (Snapshot, error) {
 	}
 	home, err := os.UserHomeDir()
 	if err == nil {
+		s.Home = home
 		s.Disk, err = diskOf(home)
 	}
 	if err != nil {

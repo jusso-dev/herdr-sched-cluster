@@ -58,23 +58,26 @@ This file is updated in the same commit as the work it describes.
 
 | Item | Status |
 | --- | --- |
-| Worker discovery from `herdr machine list --json` plus Local | not started |
-| Health from `herdr machine status --json` | not started |
-| SSH probe transport with fixed argv and quoting | not started |
-| `herdr --machine` adapter (workspace, worktree, agent start, prompt, list, close) | not started |
-| Dispatch pipeline with failure handling and retries | not started |
-| Reconciliation, restart recovery, disconnect handling | not started |
-| Draining | not started |
-| Simulated cluster harness | not started |
-| Section 14 scenarios 1 to 10 in the harness | not started |
+| Worker discovery from `herdr machine list --json` plus Local | done (`internal/cluster/coord`; disabled machines shown as disabled) |
+| Health from `herdr machine status --json` | partial: the adapter reads it, but the coordinator classifies health from its own SSH probe (unreachable, auth required, incompatible) with exponential backoff, which is one SSH round trip instead of two |
+| SSH probe transport with fixed argv and quoting | done (phase 2) |
+| `herdr --machine` adapter (workspace, worktree, agent start, prompt, list, close, process-info) | done (`internal/cluster/herdrx`, tested against a fake `herdr` that records argv) |
+| Dispatch pipeline with failure handling and retries | done: failures before an agent exists requeue up to `max_attempts`; an agent start whose answer was lost is checked with `agent list` before anything is retried |
+| At-most-once dispatch when the outcome is unknown | done: a dispatch interrupted after the agent start, with no agent found later, is failed (not retried) for a person to resubmit |
+| Reconciliation, restart recovery, disconnect handling | done: running jobs whose agent is gone are finished; reserved or dispatching jobs are adopted if their agent exists, otherwise decided after `cluster_dispatch_grace`; an unreachable worker marks its jobs disconnected and keeps their reservations |
+| Draining | done (persisted in the ledger; running agents are left alone) |
+| Simulated cluster harness | done (`internal/cluster/sim`: in-memory Herdr per machine, simulated prober, failure injection, test clock) |
+| Section 14 scenarios 1 to 10 in the harness | done, one test each (`TestScenario01` to `TestScenario10`) |
+| Property test: no double dispatch | done (30 seeded runs of 120 random steps with injected failures, lost replies, unreachable workers, restarts and clock jumps; mutation-checked: removing either guard makes it fail) |
+| Lost versus finished | gap: an agent missing from `agent list` is recorded as finished. A worker Herdr restart is not told apart from a normal exit |
 
 ## Phase 6: learning from observed usage
 
 | Item | Status |
 | --- | --- |
-| Per-agent sampling through `pane process-info` and the probe | not started |
-| Overrun handling (raise reservation, event, never kill) | not started |
-| History-based default estimates per agent kind and repository | not started |
+| Per-agent sampling through `pane process-info` and the probe | done: shell PID from `pane process-info`, process tree RSS and CPU from the worker's probe. Tree sampling is tested on real Linux; on macOS it uses `ps` and is untested on hardware |
+| Overrun handling (raise reservation, event, never kill) | done (reservation raised to observed RSS plus `cluster_overrun_margin_pct`; scenario 9) |
+| History-based default estimates per agent kind and repository | done (EWMA of peak RSS per kind and repository, falling back to per kind, then `cluster_default_memory_mb`) |
 
 ## Phase 7: polish and integration
 
