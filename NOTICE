@@ -1,0 +1,12 @@
+herdr-sched-cluster
+Copyright (c) 2026 Justin Middler
+
+This project is a derivative of herdr-sched by Husni Adil Makmur
+(https://github.com/husniadil/herdr-sched), used under the MIT License.
+The original copyright and permission notice are kept in LICENSE and apply to
+the original herdr-sched code and to this derivative.
+
+Original work: Copyright (c) 2026 Husni Adil Makmur
+
+This project calls the Herdr CLI (https://github.com/herdrdev/herdr, Apache
+License 2.0) as an external program. No Herdr source code is included.
