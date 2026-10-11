@@ -1,3 +1,13 @@
+# herdr-sched-cluster
+
+> Work in progress. This repository extends
+> [herdr-sched](https://github.com/husniadil/herdr-sched) by Husni Adil Makmur
+> (MIT) with a resource-aware scheduler that places coding agents across
+> several machines running Herdr. Start with
+> [docs/GAP-ANALYSIS.md](docs/GAP-ANALYSIS.md) and
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The upstream README follows
+> unchanged until the cluster work is documented here.
+
 # herdr-sched
 
 herdr-sched is the scheduler and trigger plugin for a Herdr fleet. A cron
