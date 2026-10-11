@@ -1,6 +1,7 @@
 package placement
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/resource"
@@ -14,6 +15,9 @@ const (
 	PolicyPack        = "pack"
 	PolicySpread      = "spread"
 	PolicyLocalFirst  = "local-first"
+	// PolicyAdaptive picks one of the presets per pass from the state of
+	// the cluster; see ResolveAdaptive.
+	PolicyAdaptive = "adaptive"
 )
 
 // Factor names, each normalised to 0..1 where 1 is better.
@@ -48,7 +52,47 @@ var Policies = map[string]Weights{
 }
 
 // PolicyNames lists the presets in documentation order.
-var PolicyNames = []string{PolicyBalanced, PolicyMemory, PolicyPerformance, PolicyPack, PolicySpread, PolicyLocalFirst}
+var PolicyNames = []string{PolicyBalanced, PolicyMemory, PolicyPerformance, PolicyPack, PolicySpread, PolicyLocalFirst, PolicyAdaptive}
+
+// ValidPolicy says whether name is a preset or adaptive.
+func ValidPolicy(name string) bool {
+	_, ok := Policies[name]
+	return ok || name == PolicyAdaptive
+}
+
+// ResolveAdaptive chooses a preset from the cluster as it stands, with the
+// reason. It is deterministic and needs no history: memory when any ready
+// worker is under memory pressure or the cluster's memory is mostly
+// committed, performance when every ready worker is mostly idle, otherwise
+// balanced.
+func ResolveAdaptive(workers []Worker) (string, string) {
+	var total, free int64
+	ready, idle := 0, 0
+	for _, w := range workers {
+		if w.State != StateReady {
+			continue
+		}
+		ready++
+		if w.Snapshot.Memory.Pressure == resource.PressureWarn || w.Snapshot.Memory.Pressure == resource.PressureCritical {
+			return PolicyMemory, fmt.Sprintf("%s reports %s memory pressure", nameOfW(w), w.Snapshot.Memory.Pressure)
+		}
+		total += w.Snapshot.Memory.TotalMB
+		free += w.FreeMemoryMB()
+		if w.ActiveAgents == 0 && w.UtilPct() < 30 {
+			idle++
+		}
+	}
+	if ready == 0 {
+		return PolicyBalanced, "no worker is ready"
+	}
+	if total > 0 && float64(free)/float64(total) < 0.3 {
+		return PolicyMemory, fmt.Sprintf("only %.0f%% of cluster memory is unreserved", 100*float64(free)/float64(total))
+	}
+	if idle == ready {
+		return PolicyPerformance, "every ready worker is idle"
+	}
+	return PolicyBalanced, "no worker is under pressure and the cluster is partly busy"
+}
 
 // Score rates an eligible worker for a job on 0..100. The factors map holds
 // each factor's raw 0..1 value, so an explanation can show both.
@@ -90,10 +134,7 @@ func Factors(job Job, w Worker) map[string]float64 {
 	if cores := w.Cores(); cores > 0 {
 		capacity := float64(cores) * s.MaxCPUCommit
 		committed := clamp01((w.CommittedCPU + job.CPU) / capacity)
-		busy := clamp01(snap.CPU.UtilPct / 100)
-		if snap.CPU.UtilSource == "declared" {
-			busy = committed
-		}
+		busy := clamp01(w.CPUAfterPct(job) / 100)
 		f[FCPU] = 1 - math.Max(committed, busy)
 		perf := snap.CPU.PerfCores
 		if perf == 0 {

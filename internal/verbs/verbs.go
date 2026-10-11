@@ -314,7 +314,8 @@ var All = []Verb{
 		Long: "Every worker: this computer (unless cluster_include_local is false) and " +
 			"every enabled machine saved with `herdr machine add`. For each it gives the " +
 			"state (ready, draining, disabled, unreachable, auth_required, incompatible, " +
-			"backoff), the latest resource reading (memory available and pressure, swap, " +
+			"backoff, herdr_unreachable when `herdr machine status` says Herdr cannot reach " +
+			"it), its remembered identity, memory pressure level, the latest resource reading (memory available and pressure, swap, " +
 			"CPU use and load, disk, power, thermal state, agents found on PATH), what " +
 			"the scheduler has reserved there, and the last probe error. Readings are " +
 			"cached for cluster_probe_ttl_seconds unless refresh is set.",
@@ -328,8 +329,10 @@ var All = []Verb{
 		Long: "Read-only. Start here before spreading work. For each worker: state, OS and " +
 			"architecture, memory total and free after reservations, the memory it always " +
 			"keeps free, pressure, agents running, and roughly how many more agents of the " +
-			"default size fit under every hard limit. Also job counts by state and the " +
-			"configured defaults. The room figure is a guide; cluster_plan gives the real " +
+			"default size fit under every hard limit, smoothed CPU use against " +
+			"max_cpu_utilisation_percent, and Herdr's own view of the machine. Also job " +
+			"counts by state and by end reason, recommendations (memory pressure, a queue " +
+			"that cannot drain, lost jobs) and the configured defaults. The room figure is a guide; cluster_plan gives the real " +
 			"answer for a specific batch.",
 	},
 	{
@@ -349,7 +352,7 @@ var All = []Verb{
 			{Name: "count", Type: Int, Desc: "With kind and repo: how many identical jobs, default 1"},
 			{Name: "memory_mb", Type: Int, Desc: "With kind and repo: memory per job in MB; omit for the learned estimate"},
 			{Name: "priority", Type: Int, Desc: "With kind and repo: priority per job, -100 to 100"},
-			{Name: "policy", Type: String, Desc: "With kind and repo: balanced, memory, performance, pack, spread or local-first"},
+			{Name: "policy", Type: String, Desc: "With kind and repo: balanced, memory, performance, pack, spread, local-first or adaptive"},
 		},
 	},
 	{
@@ -372,8 +375,10 @@ var All = []Verb{
 			"workspace there (a worktree when the repository is already busy on that " +
 			"worker), and starts the agent with `herdr agent start`. Without memory_mb " +
 			"the estimate comes from what earlier agents of this kind used in this " +
-			"repository, else cluster_default_memory_mb. A job no worker could ever run " +
-			"is refused here with the reason for each worker.",
+			"repository, else cluster_default_memory_mb; without cpu the CPU estimate is " +
+			"learned the same way from process-tree CPU, else cluster_default_cpu. A job no " +
+			"worker could ever run is refused here with the reason for each worker, and a " +
+			"submit is refused when cluster_max_queue_size jobs already wait.",
 		Args: []Arg{
 			{Name: "kind", Type: String, Desc: "Agent kind as Herdr names it: claude, codex, cursor, gemini, opencode, amp, droid, kiro, qwen, pi, and so on", Required: true, Positional: true},
 			{Name: "repo", Type: String, Desc: "Repository directory on the worker, absolute or starting with ~/", Required: true, Positional: true},
@@ -381,13 +386,17 @@ var All = []Verb{
 			{Name: "memory_mb", Type: Int, Desc: "Memory to reserve in MB; omit to use the learned estimate"},
 			{Name: "cpu", Type: String, Desc: "CPU cores to reserve, for example 1 or 1.5; default cluster_default_cpu"},
 			{Name: "priority", Type: Int, Desc: "-100 to 100; higher goes first, and waiting jobs gain priority with age"},
-			{Name: "policy", Type: String, Desc: "balanced, memory, performance, pack, spread or local-first"},
+			{Name: "policy", Type: String, Desc: "balanced, memory, performance, pack, spread, local-first or adaptive"},
 			{Name: "machine", Type: String, Desc: "Pin to one worker by id or label"},
 			{Name: "labels", Type: String, Desc: "Comma-separated labels the worker must carry"},
 			{Name: "os", Type: String, Desc: "Required worker OS: darwin, linux or windows"},
 			{Name: "arch", Type: String, Desc: "Required worker architecture: arm64 or amd64"},
 			{Name: "isolation", Type: String, Desc: "auto (worktree when the repo is busy there), worktree, or none"},
 			{Name: "agent_args", Type: String, Desc: "Extra arguments for the agent, space-separated; each limited to letters, digits and ._/:=,@+%-"},
+			{Name: "restartable", Type: Bool, Desc: "Safe to start again from scratch if it is lost (its session vanished or Herdr restarted); otherwise a lost job is never retried"},
+			{Name: "disposable", Type: Bool, Desc: "May be closed under sustained critical memory pressure when cluster_pressure_action is terminate-disposable"},
+			{Name: "depends_on", Type: String, Desc: "Comma-separated job ids that must finish first; if one fails, is cancelled or is lost, this job fails too"},
+			{Name: "clone_url", Type: String, Desc: "Clone this URL to repo on a worker that does not have it (https, ssh:// or user@host:path, no credentials)"},
 		},
 		Mutates: true,
 		Gated:   "sched.cluster.submit",
@@ -410,8 +419,13 @@ var All = []Verb{
 		Short: "Explain why a job was placed where it was, or why it is waiting",
 		Long: "Every placement decision recorded for the job, with each worker's " +
 			"eligibility, the reasons it was ruled out, its score and the factors " +
-			"behind the score. For a queued job it also places the job again against " +
-			"the current readings, without dispatching, so the answer is up to date.",
+			"behind the score, including projected CPU utilisation against " +
+			"max_cpu_utilisation_percent. For a queued job it also places the job again " +
+			"against the current readings, without dispatching, so the answer is up to " +
+			"date. It also shows the job's end reason (agent_exited, session_vanished, " +
+			"herdr_restarted, worker_unreachable, ...), its worktree cleanup decision, " +
+			"the state of each dependency, what history has learned about this kind of " +
+			"job, and for a running job how to attach to it.",
 		Args: []Arg{
 			{Name: "id", Type: String, Desc: "The job id, for example j12", Required: true, Positional: true},
 		},
@@ -421,7 +435,8 @@ var All = []Verb{
 		Short: "Cancel a job that has not started",
 		Long: "Cancels a queued or reserved job and releases its capacity. A running " +
 			"job is refused: the scheduler never stops an agent. Close it in Herdr, " +
-			"or use cluster detach to stop tracking it.",
+			"or use cluster detach to stop tracking it. With cluster_owner_checks on, " +
+			"an agent may only cancel jobs it submitted; the operator may cancel any.",
 		Args: []Arg{
 			{Name: "id", Type: String, Desc: "The job id", Required: true, Positional: true},
 		},
@@ -464,6 +479,39 @@ var All = []Verb{
 		Gated:   "sched.cluster.undrain",
 	},
 	{
+		Name: "cluster.attach", MCP: "cluster_attach", CLI: []string{"cluster", "attach"},
+		Short: "Show how to open a running job's agent in Herdr",
+		Long: "Read-only. Gives the commands that open the job's agent: herdr agent focus " +
+			"for this computer, or herdr --remote to the worker followed by herdr agent " +
+			"focus inside it. Nothing is opened or changed by this call; Herdr does not " +
+			"allow attaching through --machine, so the hint is for a person to run.",
+		Args: []Arg{
+			{Name: "id", Type: String, Desc: "The job id", Required: true, Positional: true},
+		},
+	},
+	{
+		Name: "cluster.estimates", MCP: "cluster_estimates", CLI: []string{"cluster", "estimates"},
+		Short: "Show the memory and CPU estimates learned from earlier runs",
+		Long: "Read-only. For each agent kind, and each kind in each repository with " +
+			"history, the cluster_history_percentile of peak memory and of CPU (in cores) " +
+			"over the newest cluster_history_window runs, measured from each agent's " +
+			"process tree, with how many runs it is based on. These are what submit and " +
+			"plan use when memory_mb or cpu is left out (before cluster_history_headroom_pct).",
+	},
+	{
+		Name: "cluster.reregister", MCP: "cluster_reregister", CLI: []string{"cluster", "reregister"},
+		Short: "Accept a worker's new identity after it was rebuilt or replaced",
+		Long: "The coordinator remembers each worker's host name, OS and architecture the " +
+			"first time it answers, and marks it incompatible if a different machine " +
+			"answers later. When that change is expected, this forgets the remembered " +
+			"identity so the next probe registers the machine afresh.",
+		Args: []Arg{
+			{Name: "worker", Type: String, Desc: "Worker id or label", Required: true, Positional: true},
+		},
+		Mutates: true,
+		Gated:   "sched.cluster.reregister",
+	},
+	{
 		Name: "cluster.events", MCP: "cluster_events", CLI: []string{"cluster", "events"},
 		Short: "Read the cluster's own event trail",
 		Long: "Reservations, dispatches, failures, adoptions after a restart, " +
@@ -491,11 +539,12 @@ var PlanItems = []Arg{
 	{Name: "memory_mb", Type: Int, Desc: "Memory to reserve in MB; omit to use the learned estimate"},
 	{Name: "cpu", Type: String, Desc: "CPU cores to reserve, for example 1 or 1.5"},
 	{Name: "priority", Type: Int, Desc: "-100 to 100; higher goes first"},
-	{Name: "policy", Type: String, Desc: "balanced, memory, performance, pack, spread or local-first"},
+	{Name: "policy", Type: String, Desc: "balanced, memory, performance, pack, spread, local-first or adaptive"},
 	{Name: "machine", Type: String, Desc: "Pin to one worker by id or label"},
 	{Name: "labels", Type: String, Desc: "Comma-separated labels the worker must carry"},
 	{Name: "os", Type: String, Desc: "Required worker OS: darwin, linux or windows"},
 	{Name: "arch", Type: String, Desc: "Required worker architecture: arm64 or amd64"},
+	{Name: "clone_url", Type: String, Desc: "Clone this URL to repo on a worker that does not have it"},
 }
 
 // ByName finds the verb a socket request names.

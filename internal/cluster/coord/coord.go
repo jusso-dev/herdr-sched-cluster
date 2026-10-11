@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/gitop"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/herdrx"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/ledger"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/placement"
@@ -30,6 +30,34 @@ type Target struct {
 	Static    resource.StaticSpec
 	Settings  placement.Settings
 	Disabled  bool
+	// Session is the Herdr session the machine is saved with, for attach
+	// hints.
+	Session string
+	// PathMap rewrites repository paths for this worker.
+	PathMap map[string]string
+}
+
+// GitOps runs the scheduler's two Git operations on a worker: deleting a
+// branch it made, and cloning a repository a job needs.
+type GitOps interface {
+	Run(ctx context.Context, t Target, r gitop.Request) (gitop.Result, error)
+}
+
+// DefaultGitOps runs on this computer directly and on a remote worker over
+// SSH, through `hsched cluster gitop`.
+type DefaultGitOps struct {
+	SSH transport.SSH
+}
+
+// Run implements GitOps.
+func (g DefaultGitOps) Run(ctx context.Context, t Target, r gitop.Request) (gitop.Result, error) {
+	if t.Local {
+		return gitop.Run(ctx, r), nil
+	}
+	if t.SSHTarget == "" {
+		return gitop.Result{}, fmt.Errorf("worker %s has no SSH target to run git on", t.ID)
+	}
+	return g.SSH.GitOp(ctx, t.SSHTarget, t.Program, r)
 }
 
 // Prober reads a worker's resources.
@@ -64,6 +92,7 @@ type Coordinator struct {
 	L   *ledger.Ledger
 	H   herdrx.Herdr
 	P   Prober
+	G   GitOps
 	Cfg Config
 	Now func() time.Time
 
@@ -72,19 +101,60 @@ type Coordinator struct {
 	imu      sync.Mutex
 	inflight map[string]bool
 
-	cmu   sync.Mutex
-	cache map[string]cached
+	cmu     sync.Mutex
+	cache   map[string]cached
+	cpu     map[string]smoothed // per worker, smoothed CPU utilisation
+	targets map[string]Target   // the last Targets answer, by worker id
+	mstatus map[string]herdrx.MachineStatus
+	msAt    time.Time
+	msErr   bool
+	lastCut map[string]time.Time // last pressure termination per worker
+
+	tick int64 // correlation id for one Tick's events
 }
 
 type cached struct {
-	snap    resource.Snapshot
-	latency int64
-	at      time.Time
+	snap     resource.Snapshot
+	latency  int64
+	at       time.Time
+	mismatch string // a changed identity, which makes the worker incompatible
 }
+
+type smoothed struct {
+	pct float64
+	at  time.Time // CollectedAt of the last reading folded in
+}
+
+// cpuAlpha is the weight of the newest CPU reading in the moving average.
+const cpuAlpha = 0.5
 
 // New builds a coordinator.
 func New(l *ledger.Ledger, h herdrx.Herdr, p Prober, cfg Config) *Coordinator {
-	return &Coordinator{L: l, H: h, P: p, Cfg: cfg, Now: time.Now, inflight: map[string]bool{}, cache: map[string]cached{}}
+	return &Coordinator{L: l, H: h, P: p, G: DefaultGitOps{}, Cfg: cfg, Now: time.Now, inflight: map[string]bool{},
+		cache: map[string]cached{}, cpu: map[string]smoothed{}, targets: map[string]Target{}, lastCut: map[string]time.Time{}}
+}
+
+// event adds an event carrying the current tick as its correlation id.
+func (c *Coordinator) event(ctx context.Context, kind, job, worker string, detail map[string]any) {
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	c.cmu.Lock()
+	if c.tick > 0 {
+		detail["tick"] = c.tick
+	}
+	c.cmu.Unlock()
+	_ = c.L.AddEvent(ctx, kind, job, worker, detail)
+}
+
+// target is the last known Target for a worker id.
+func (c *Coordinator) target(id string) Target {
+	c.cmu.Lock()
+	defer c.cmu.Unlock()
+	if t, ok := c.targets[id]; ok {
+		return t
+	}
+	return Target{ID: id, Local: id == herdrx.Local}
 }
 
 func (c *Coordinator) now() time.Time { return c.Now() }
@@ -139,6 +209,7 @@ func (c *Coordinator) Targets(ctx context.Context) ([]Target, error) {
 		if t.Probe == ProbeOff {
 			t.Disabled = true
 		}
+		t.PathMap = wc.PathMap
 		out = append(out, t)
 	}
 	if c.Cfg.IncludeLocal {
@@ -146,12 +217,17 @@ func (c *Coordinator) Targets(ctx context.Context) ([]Target, error) {
 	}
 	ms, err := c.H.Machines(ctx)
 	for _, m := range ms {
-		t := Target{ID: m.ID, Label: m.Label, SSHTarget: m.Target, Disabled: !m.Enabled}
+		t := Target{ID: m.ID, Label: m.Label, SSHTarget: m.Target, Disabled: !m.Enabled, Session: m.Session}
 		if t.Label == "" {
 			t.Label = m.ID
 		}
 		add(t, c.workerConfig(m.ID, m.Label))
 	}
+	c.cmu.Lock()
+	for _, t := range out {
+		c.targets[t.ID] = t
+	}
+	c.cmu.Unlock()
 	return out, err
 }
 
@@ -190,6 +266,7 @@ func (c *Coordinator) workersWith(ctx context.Context, force bool, pids map[stri
 		}(i, t)
 	}
 	wg.Wait()
+	status := c.machineStatus(ctx)
 	for i := range out {
 		static := out[i].Snapshot.Backend == resource.BackendStatic
 		ld, err := c.L.LoadOf(ctx, out[i].ID, static)
@@ -198,14 +275,113 @@ func (c *Coordinator) workersWith(ctx context.Context, force bool, pids map[stri
 		}
 		out[i].PendingMemoryMB = ld.PendingMemoryMB
 		out[i].CommittedCPU = ld.CommittedCPU
+		out[i].PendingCPU = ld.PendingCPU
 		out[i].ActiveAgents = ld.ActiveAgents
 		out[i].RunningRepos = ld.RunningRepos
+		out[i].ClusterRepos = ld.ClusterRepos
+		out[i].CPUUtilPct = c.smoothCPU(out[i])
+		if ms, ok := status[out[i].ID]; ok && out[i].State == placement.StateReady {
+			switch ms.Status {
+			case "error":
+				out[i].State = placement.StateHerdrDown
+			case "auth required":
+				out[i].State = placement.StateAuth
+			}
+		}
 	}
 	sort.SliceStable(out, func(a, b int) bool { return out[a].ID < out[b].ID })
 	if terr != nil {
 		_ = c.L.AddEvent(ctx, "cluster.herdr.machine_list_failed", "", "", map[string]any{"error": terr.Error()})
 	}
 	return out, nil
+}
+
+// smoothCPU folds a worker's newest CPU reading into its moving average, so
+// one busy sample does not swing admission. A reading already folded in is
+// not counted twice.
+func (c *Coordinator) smoothCPU(w placement.Worker) float64 {
+	if w.Snapshot.CollectedAt.IsZero() || w.Snapshot.CPU.UtilSource == "declared" || w.Snapshot.CPU.UtilSource == "" {
+		return 0
+	}
+	c.cmu.Lock()
+	defer c.cmu.Unlock()
+	prev, ok := c.cpu[w.ID]
+	switch {
+	case !ok:
+		prev = smoothed{pct: w.Snapshot.CPU.UtilPct, at: w.Snapshot.CollectedAt}
+	case w.Snapshot.CollectedAt.After(prev.at):
+		prev = smoothed{pct: cpuAlpha*w.Snapshot.CPU.UtilPct + (1-cpuAlpha)*prev.pct, at: w.Snapshot.CollectedAt}
+	}
+	c.cpu[w.ID] = prev
+	return prev.pct
+}
+
+// machineStatus is what `herdr machine status` last said, refreshed at most
+// every MachineStatusEvery. A Herdr too old to have the verb is remembered and
+// not asked again.
+func (c *Coordinator) machineStatus(ctx context.Context) map[string]herdrx.MachineStatus {
+	if c.Cfg.MachineStatusEvery <= 0 {
+		return nil
+	}
+	now := c.now()
+	c.cmu.Lock()
+	fresh := c.mstatus != nil && now.Sub(c.msAt) < c.Cfg.MachineStatusEvery
+	failed := c.msErr && now.Sub(c.msAt) < c.Cfg.MachineStatusEvery
+	cur := c.mstatus
+	c.cmu.Unlock()
+	if fresh || failed {
+		return cur
+	}
+	rows, err := c.H.MachineStatus(ctx)
+	c.cmu.Lock()
+	c.msAt = now
+	if err != nil {
+		if !c.msErr {
+			c.cmu.Unlock()
+			_ = c.L.AddEvent(ctx, "cluster.herdr.machine_status_failed", "", "", map[string]any{"error": err.Error()})
+			c.cmu.Lock()
+		}
+		c.msErr = true
+		cur = c.mstatus
+		c.cmu.Unlock()
+		return cur
+	}
+	c.msErr = false
+	m := map[string]herdrx.MachineStatus{}
+	for _, r := range rows {
+		m[r.ID] = r
+	}
+	c.mstatus = m
+	c.cmu.Unlock()
+	for _, r := range rows {
+		_ = c.L.SetHerdrStatus(ctx, r.ID, r.Label, r.Status, r.Error)
+	}
+	return m
+}
+
+// identity is what a worker says it is: host, operating system and
+// architecture. A change means a different machine answers at that address.
+func identity(s resource.Snapshot) string {
+	if s.Host == "" {
+		return ""
+	}
+	return s.Host + "/" + s.OS + "/" + s.Arch
+}
+
+// mapPaths asks a worker about each repository at its mapped location and
+// returns the request plus the way back to the logical path.
+func mapPaths(m map[string]string, paths []string) ([]string, map[string]string) {
+	if len(m) == 0 {
+		return paths, nil
+	}
+	back := map[string]string{}
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		q := MapPath(m, p)
+		back[q] = p
+		out = append(out, q)
+	}
+	return out, back
 }
 
 func (c *Coordinator) worker(ctx context.Context, t Target, row ledger.WorkerRow, force bool, paths []string, pids []int) placement.Worker {
@@ -221,13 +397,28 @@ func (c *Coordinator) worker(ctx context.Context, t Target, row ledger.WorkerRow
 		return w
 	case !force && len(pids) == 0 && have && now.Sub(prev.at) < c.Cfg.ProbeTTL && covers(prev.snap, paths):
 		w.Snapshot, w.LatencyMS = prev.snap, prev.latency
+		if prev.mismatch != "" {
+			w.State = placement.StateIncompatible
+			return w
+		}
 	case !force && row.BackoffUntil.After(now):
 		w.State = placement.StateBackoff
 		w.Snapshot = prev.snap
 		return w
 	default:
-		req := resource.Request{Paths: paths, PIDs: pids}
+		asked, back := mapPaths(t.PathMap, paths)
+		req := resource.Request{Paths: asked, PIDs: pids}
 		snap, lat, err := c.P.Probe(ctx, t, req)
+		if err == nil && back != nil {
+			logical := map[string]bool{}
+			for k, v := range snap.Paths {
+				if l, ok := back[k]; ok {
+					k = l
+				}
+				logical[k] = v
+			}
+			snap.Paths = logical
+		}
 		if err != nil {
 			state := placement.StateUnreachable
 			var te *transport.Error
@@ -244,11 +435,29 @@ func (c *Coordinator) worker(ctx context.Context, t Target, row ledger.WorkerRow
 			w.State = state
 			return w
 		}
-		_ = c.L.RecordProbe(ctx, t.ID, t.Label, placement.StateReady, snap, lat)
+		mismatch := ""
+		if c.Cfg.VerifyIdentity && snap.Backend != resource.BackendStatic {
+			id := identity(snap)
+			if prevID, err := c.L.CheckIdentity(ctx, t.ID, t.Label, id); err == nil && prevID != "" && id != "" && prevID != id {
+				mismatch = fmt.Sprintf("identity changed: was %s, now %s; if the machine was rebuilt on purpose, run hsched cluster reregister %s", prevID, id, t.ID)
+			}
+		}
+		state := placement.StateReady
+		if mismatch != "" {
+			state = placement.StateIncompatible
+			if row.LastError != mismatch {
+				_ = c.L.AddEvent(ctx, "cluster.worker.identity_mismatch", "", t.ID, map[string]any{"detail": mismatch})
+			}
+		}
+		_ = c.L.RecordProbe(ctx, t.ID, t.Label, state, snap, lat)
 		c.cmu.Lock()
-		c.cache[t.ID] = cached{snap: snap, latency: lat, at: now}
+		c.cache[t.ID] = cached{snap: snap, latency: lat, at: now, mismatch: mismatch}
 		c.cmu.Unlock()
 		w.Snapshot, w.LatencyMS = snap, lat
+		if mismatch != "" {
+			w.State = state
+			return w
+		}
 	}
 	if row.Draining {
 		w.State = placement.StateDraining
@@ -313,7 +522,8 @@ func (c *Coordinator) PlacementJob(j ledger.Job) placement.Job {
 		p = c.Cfg.Policy
 	}
 	return placement.Job{ID: j.ID, Kind: j.Kind, Repo: j.Repo, MemoryMB: j.MemoryMB, CPU: j.CPU, Policy: p,
-		Machine: j.Machine, Labels: j.Labels, OS: j.OS, Arch: j.Arch}
+		Machine: j.Machine, Labels: j.Labels, OS: j.OS, Arch: j.Arch,
+		ExclusiveRepo: j.NoWorktree, MaxPerRepo: c.Cfg.MaxPerRepo, Cloneable: j.CloneURL != ""}
 }
 
 // Report is what one Pump did.
@@ -357,6 +567,12 @@ func (c *Coordinator) pump(ctx context.Context) (Report, error) {
 	byID := map[string]ledger.Job{}
 	var entries []queue.Entry
 	for _, j := range queued {
+		if ready, err := c.dependenciesReady(ctx, j); err != nil {
+			return rep, err
+		} else if !ready {
+			rep.Waiting = append(rep.Waiting, j.ID)
+			continue
+		}
 		byID[j.ID] = j
 		entries = append(entries, queue.Entry{Job: c.PlacementJob(j), Priority: j.Priority, SubmittedAt: j.SubmittedAt, Seq: j.Seq})
 	}
@@ -368,7 +584,7 @@ func (c *Coordinator) pump(ctx context.Context) (Report, error) {
 	rep.Holds = plan.Holds
 	for _, d := range plan.Waiting {
 		rep.Waiting = append(rep.Waiting, d.JobID)
-		_ = c.L.RecordDecision(ctx, d.JobID, "", d.Policy, d.Summary, d)
+		c.decide(ctx, d.JobID, "", d.Policy, d.Summary, d)
 	}
 	wByID := map[string]placement.Worker{}
 	for _, w := range workers {
@@ -384,6 +600,7 @@ func (c *Coordinator) pump(ctx context.Context) (Report, error) {
 		token, err := c.L.Reserve(ctx, job.ID, w.ID, static, func(ld ledger.Load) error {
 			fresh := w
 			fresh.PendingMemoryMB, fresh.CommittedCPU, fresh.ActiveAgents, fresh.RunningRepos = ld.PendingMemoryMB, ld.CommittedCPU, ld.ActiveAgents, ld.RunningRepos
+			fresh.PendingCPU, fresh.ClusterRepos = ld.PendingCPU, ld.ClusterRepos
 			if r := placement.Eligible(pj, fresh); len(r) > 0 {
 				return fmt.Errorf("%s no longer fits: %s", w.ID, strings.Join(r, "; "))
 			}
@@ -392,10 +609,10 @@ func (c *Coordinator) pump(ctx context.Context) (Report, error) {
 		})
 		if err != nil {
 			rep.Waiting = append(rep.Waiting, job.ID)
-			_ = c.L.RecordDecision(ctx, job.ID, "", a.Decision.Policy, "capacity changed before the reservation: "+err.Error(), a.Decision)
+			c.decide(ctx, job.ID, "", a.Decision.Policy, "capacity changed before the reservation: "+err.Error(), a.Decision)
 			continue
 		}
-		_ = c.L.RecordDecision(ctx, job.ID, w.ID, a.Decision.Policy, a.Decision.Summary, a.Decision)
+		c.decide(ctx, job.ID, w.ID, a.Decision.Policy, a.Decision.Summary, a.Decision)
 		job.Token = token
 		if err := c.dispatch(ctx, job, w, lastLoad); err != nil {
 			rep.Failed[job.ID] = err.Error()
@@ -425,368 +642,4 @@ func resolveRepo(repo string, snap resource.Snapshot) (string, error) {
 		return path.Join(snap.Home, strings.TrimPrefix(repo, "~")), nil
 	}
 	return repo, nil
-}
-
-// dispatch opens a workspace (or worktree), starts the agent and gives it
-// the prompt. It never requeues a job unless it has confirmed no agent of
-// that name exists on the worker, which is what prevents a double dispatch.
-func (c *Coordinator) dispatch(ctx context.Context, job ledger.Job, w placement.Worker, ld ledger.Load) error {
-	c.setInflight(job.ID, true)
-	defer c.setInflight(job.ID, false)
-	m := machineArg(w.ID)
-	name := ledger.AgentName(job.ID)
-	fail := func(stage string, err error, workspace string) error {
-		if workspace != "" {
-			_ = c.H.WorkspaceClose(ctx, m, workspace)
-		}
-		state, ferr := c.L.DispatchFailed(ctx, job.ID, job.Token, stage+": "+err.Error())
-		if ferr != nil {
-			return fmt.Errorf("%s: %v (and recording it failed: %v)", stage, err, ferr)
-		}
-		_ = c.L.AddEvent(ctx, "cluster.dispatch.failed", job.ID, w.ID, map[string]any{"stage": stage, "now": state})
-		return fmt.Errorf("%s on %s: %w", stage, w.ID, err)
-	}
-	worktree := false
-	isolation := job.Isolation
-	if isolation == "" {
-		isolation = c.Cfg.Isolation
-	}
-	switch isolation {
-	case IsolationWorktree:
-		worktree = true
-	case IsolationAuto:
-		// ld is the load just before this job's reservation, so any
-		// count means another job already holds this repository here.
-		worktree = ld.RunningRepos[job.Repo] > 0
-	}
-	if err := c.L.MarkDispatching(ctx, job.ID, job.Token, worktree); err != nil {
-		return err
-	}
-	repo, err := resolveRepo(job.Repo, w.Snapshot)
-	if err != nil {
-		return fail("resolve repository", err, "")
-	}
-	var pl herdrx.Placement
-	if worktree {
-		pl, err = c.H.WorktreeCreate(ctx, m, repo, "hsc/"+job.ID, name)
-	} else {
-		pl, err = c.H.WorkspaceCreate(ctx, m, repo, name)
-	}
-	if err != nil {
-		return fail("open workspace", err, "")
-	}
-	if err := c.L.SetWorkspace(ctx, job.ID, job.Token, pl.WorkspaceID, pl.PaneID); err != nil {
-		return err
-	}
-	err = c.H.AgentStart(ctx, m, herdrx.StartRequest{Name: name, Kind: job.Kind, Pane: pl.PaneID, Timeout: c.Cfg.DispatchTimeout, Args: job.AgentArgs})
-	if err != nil && herdrx.Code(err) != "timeout" {
-		// The call failed, but the agent may still have started (a dropped
-		// connection after Herdr acted). Look before deciding.
-		agents, lerr := c.H.Agents(ctx, m)
-		if lerr != nil {
-			_ = c.L.AddEvent(ctx, "cluster.dispatch.uncertain", job.ID, w.ID, map[string]any{"error": err.Error()})
-			return fmt.Errorf("agent start on %s is uncertain; reconciliation will decide: %w", w.ID, err)
-		}
-		if !hasAgent(agents, name) {
-			return fail("start agent", err, pl.WorkspaceID)
-		}
-	}
-	if job.Prompt != "" {
-		if perr := c.H.AgentPrompt(ctx, m, pl.PaneID, job.Prompt); perr != nil {
-			// The agent is running; it must not be started again elsewhere.
-			_ = c.L.AddEvent(ctx, "cluster.dispatch.prompt_failed", job.ID, w.ID, map[string]any{"error": perr.Error()})
-		}
-	}
-	return c.L.MarkRunning(ctx, job.ID, job.Token, pl.PaneID)
-}
-
-func hasAgent(agents []herdrx.Agent, name string) bool {
-	for _, a := range agents {
-		if a.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-// Reconcile compares the ledger with what each worker's Herdr reports. It
-// returns, per worker, the shell PIDs of running jobs, keyed so a probe can
-// measure them.
-func (c *Coordinator) Reconcile(ctx context.Context) (map[string]map[int]string, error) {
-	active, err := c.L.List(ctx, ledger.Reserved, ledger.Dispatching, ledger.Running)
-	if err != nil {
-		return nil, err
-	}
-	byWorker := map[string][]ledger.Job{}
-	for _, j := range active {
-		byWorker[j.Worker] = append(byWorker[j.Worker], j)
-	}
-	pids := map[string]map[int]string{}
-	now := c.now()
-	for worker, jobs := range byWorker {
-		m := machineArg(worker)
-		agents, err := c.H.Agents(ctx, m)
-		if err != nil {
-			for _, j := range jobs {
-				if j.State == ledger.Running {
-					_ = c.L.SetDisconnected(ctx, j.ID, true)
-				}
-			}
-			continue
-		}
-		live := map[string]herdrx.Agent{}
-		for _, a := range agents {
-			live[a.Name] = a
-		}
-		for _, j := range jobs {
-			if c.isInflight(j.ID) {
-				continue
-			}
-			a, ok := live[ledger.AgentName(j.ID)]
-			switch j.State {
-			case ledger.Running:
-				if !ok {
-					_ = c.L.Finish(ctx, j.ID, ledger.Finished, "agent is no longer listed by Herdr on "+worker)
-					continue
-				}
-				_ = c.L.SetDisconnected(ctx, j.ID, false)
-				pane := a.PaneID
-				if pane == "" {
-					pane = j.PaneID
-				}
-				if pane == "" {
-					continue
-				}
-				pi, err := c.H.ProcessInfo(ctx, m, pane)
-				if err != nil {
-					continue
-				}
-				pid := pi.ShellPID
-				if pid == 0 && len(pi.Foreground) > 0 {
-					pid = pi.Foreground[0].PID
-				}
-				if pid > 0 {
-					if pids[worker] == nil {
-						pids[worker] = map[int]string{}
-					}
-					pids[worker][pid] = j.ID
-				}
-			case ledger.Reserved, ledger.Dispatching:
-				if ok {
-					_ = c.L.AdoptRunning(ctx, j.ID, a.PaneID, a.WorkspaceID)
-					continue
-				}
-				if now.Sub(j.UpdatedAt) < c.Cfg.DispatchGrace {
-					continue
-				}
-				if j.State == ledger.Dispatching && j.WorkspaceID != "" {
-					// The agent start may have run, and the agent may
-					// already have finished. Starting it again could do
-					// the work twice, so the job is failed for a person
-					// to look at instead.
-					_ = c.L.Abandon(ctx, j.ID, j.Token, "dispatch was interrupted after the agent start on "+worker+
-						"; no agent is running now, so it may have started and finished. Not retried; resubmit if needed")
-					continue
-				}
-				if j.WorkspaceID != "" {
-					_ = c.H.WorkspaceClose(ctx, m, j.WorkspaceID)
-				}
-				_, _ = c.L.DispatchFailed(ctx, j.ID, j.Token, "dispatch did not finish and no agent was found on "+worker)
-			}
-		}
-	}
-	return pids, nil
-}
-
-// Observe probes the workers that have running jobs, measuring each job's
-// process tree, and records the usage. A job over its reservation has the
-// reservation raised; nothing is ever killed.
-func (c *Coordinator) Observe(ctx context.Context, pids map[string]map[int]string) error {
-	if len(pids) == 0 {
-		return nil
-	}
-	req := map[string][]int{}
-	for w, m := range pids {
-		for pid := range m {
-			req[w] = append(req[w], pid)
-		}
-		sort.Ints(req[w])
-	}
-	workers, err := c.Workers(ctx, false, req)
-	if err != nil {
-		return err
-	}
-	for _, w := range workers {
-		for _, p := range w.Snapshot.Processes {
-			job, ok := pids[w.ID][p.PID]
-			if !ok || !p.Found {
-				continue
-			}
-			if _, err := c.L.Observe(ctx, job, p.RSSMB, p.CPUPct, c.Cfg.OverrunMarginPct); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// Tick is one full round: reconcile, measure, then plan and dispatch.
-func (c *Coordinator) Tick(ctx context.Context) (Report, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	pids, err := c.Reconcile(ctx)
-	if err != nil {
-		return Report{}, err
-	}
-	if err := c.Observe(ctx, pids); err != nil {
-		return Report{}, err
-	}
-	return c.pump(ctx)
-}
-
-// Drain stops new work going to a worker; running agents carry on.
-func (c *Coordinator) Drain(ctx context.Context, worker string, draining bool, by string) (string, error) {
-	targets, _ := c.Targets(ctx)
-	for _, t := range targets {
-		if t.ID == worker || t.Label == worker {
-			return t.ID, c.L.SetDraining(ctx, t.ID, draining, by)
-		}
-	}
-	return "", fmt.Errorf("no worker called %s; see hsched cluster workers", worker)
-}
-
-// SubmitRequest is a request to run an agent somewhere in the cluster.
-type SubmitRequest struct {
-	Kind        string
-	Repo        string
-	Prompt      string
-	AgentArgs   []string
-	MemoryMB    int64
-	CPU         float64
-	Priority    int
-	Policy      string
-	Machine     string
-	Labels      []string
-	OS, Arch    string
-	Isolation   string
-	SubmittedBy string
-}
-
-var (
-	argRe   = regexp.MustCompile(`^[A-Za-z0-9._/:=,@+%-]{1,256}$`)
-	labelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-)
-
-// MaxPromptChars bounds a prompt.
-const MaxPromptChars = 100_000
-
-// Submit validates a request, estimates what it needs when the caller did
-// not say, checks that some worker could ever run it, and queues it.
-func (c *Coordinator) Submit(ctx context.Context, r SubmitRequest) (ledger.Job, []string, error) {
-	r, source, notes, err := c.prepare(ctx, r)
-	if err != nil {
-		return ledger.Job{}, nil, err
-	}
-	pj := placement.Job{Kind: r.Kind, Repo: r.Repo, MemoryMB: r.MemoryMB, CPU: r.CPU, Policy: r.Policy, Machine: r.Machine, Labels: r.Labels, OS: r.OS, Arch: r.Arch}
-	workers, err := c.Workers(ctx, false, nil)
-	if err != nil {
-		return ledger.Job{}, nil, err
-	}
-	if ok, why := placement.FitsAnywhereEver(pj, workers); !ok {
-		return ledger.Job{}, nil, fmt.Errorf("no worker could ever run this job:\n  %s", strings.Join(why, "\n  "))
-	}
-	job, err := c.L.Submit(ctx, ledger.NewJob{Kind: r.Kind, Repo: r.Repo, Prompt: r.Prompt, AgentArgs: r.AgentArgs,
-		MemoryMB: r.MemoryMB, CPU: r.CPU, EstimateSource: source, Priority: r.Priority, Policy: r.Policy,
-		Machine: r.Machine, Labels: r.Labels, OS: r.OS, Arch: r.Arch, Isolation: r.Isolation,
-		SubmittedBy: r.SubmittedBy, MaxAttempts: c.Cfg.MaxAttempts})
-	return job, notes, err
-}
-
-// prepare validates a request and fills in the memory and CPU estimates the
-// caller left out. Submit and Plan share it, so a plan refuses exactly what a
-// submit would.
-func (c *Coordinator) prepare(ctx context.Context, r SubmitRequest) (SubmitRequest, string, []string, error) {
-	var notes []string
-	if _, ok := resource.AgentExecutables[r.Kind]; !ok {
-		return r, "", nil, fmt.Errorf("unknown agent kind %q; one of %v", r.Kind, resource.AgentKinds())
-	}
-	if err := transport.ValidatePath(r.Repo); err != nil {
-		return r, "", nil, fmt.Errorf("repository: %w", err)
-	}
-	if len(r.Prompt) > MaxPromptChars {
-		return r, "", nil, fmt.Errorf("prompt is %d characters; the limit is %d", len(r.Prompt), MaxPromptChars)
-	}
-	for _, a := range r.AgentArgs {
-		if !argRe.MatchString(a) {
-			return r, "", nil, fmt.Errorf("agent argument %q has characters outside [A-Za-z0-9._/:=,@+%%-]", a)
-		}
-	}
-	for _, l := range r.Labels {
-		if !labelRe.MatchString(l) {
-			return r, "", nil, fmt.Errorf("label %q must be lower case letters, digits, dot, dash or underscore", l)
-		}
-	}
-	if r.Policy != "" {
-		if _, ok := placement.Policies[r.Policy]; !ok {
-			return r, "", nil, fmt.Errorf("policy %q is not one of %v", r.Policy, placement.PolicyNames)
-		}
-	}
-	switch r.Isolation {
-	case "", IsolationAuto, IsolationWorktree, IsolationNone:
-	default:
-		return r, "", nil, fmt.Errorf("isolation %q is not auto, worktree or none", r.Isolation)
-	}
-	if r.Priority < -100 || r.Priority > 100 {
-		return r, "", nil, fmt.Errorf("priority must be between -100 and 100")
-	}
-	if r.MemoryMB < 0 || r.CPU < 0 {
-		return r, "", nil, fmt.Errorf("memory and cpu cannot be negative")
-	}
-	source := "requested"
-	if r.MemoryMB == 0 {
-		mb, src, ok, err := c.L.Estimate(ctx, r.Kind, r.Repo, c.Cfg.HistoryHeadroomPct)
-		if err != nil {
-			return r, "", nil, err
-		}
-		if ok {
-			r.MemoryMB, source = mb, src
-		} else {
-			r.MemoryMB, source = c.Cfg.DefaultMemoryMB, "default"
-		}
-		notes = append(notes, fmt.Sprintf("memory estimate %d MB (%s)", r.MemoryMB, source))
-	}
-	if r.CPU == 0 {
-		r.CPU = c.Cfg.DefaultCPU
-	}
-	return r, source, notes, nil
-}
-
-// Explanation is why a job is where it is.
-type Explanation struct {
-	Job       ledger.Job          `json:"job"`
-	Decisions []ledger.Decision   `json:"decisions"`
-	Now       *placement.Decision `json:"now,omitempty"`
-}
-
-// Explain returns a job's recorded decisions and, for a queued job, how
-// placement sees it right now.
-func (c *Coordinator) Explain(ctx context.Context, id string) (Explanation, error) {
-	j, err := c.L.Get(ctx, id)
-	if err != nil {
-		return Explanation{}, err
-	}
-	ds, err := c.L.Decisions(ctx, id)
-	if err != nil {
-		return Explanation{}, err
-	}
-	ex := Explanation{Job: j, Decisions: ds}
-	if j.State == ledger.Queued {
-		ws, err := c.Workers(ctx, false, nil)
-		if err != nil {
-			return ex, err
-		}
-		d := placement.Place(c.PlacementJob(j), ws)
-		ex.Now = &d
-	}
-	return ex, nil
 }

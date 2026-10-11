@@ -45,6 +45,9 @@ func writeCluster(verb string, result json.RawMessage, out io.Writer) error {
 			if w.HeldFor != "" {
 				notes = append(notes, "held for "+w.HeldFor)
 			}
+			if w.CPUUtilPct > 0 {
+				notes = append(notes, fmt.Sprintf("cpu smoothed %.0f%%", w.CPUUtilPct))
+			}
 			name := w.ID
 			if w.Label != "" && w.Label != w.ID {
 				name = w.Label
@@ -58,7 +61,7 @@ func writeCluster(verb string, result json.RawMessage, out io.Writer) error {
 			return err
 		}
 		fmt.Fprintln(out, st.Summary)
-		fmt.Fprintf(out, "%-14s %-13s %-13s %9s %9s %9s %-9s %6s %s\n", "WORKER", "STATE", "PLATFORM", "TOTAL", "FREE", "KEEPFREE", "PRESSURE", "AGENTS", "ROOM")
+		fmt.Fprintf(out, "%-14s %-17s %-13s %9s %9s %9s %-9s %8s %6s %s\n", "WORKER", "STATE", "PLATFORM", "TOTAL", "FREE", "KEEPFREE", "PRESSURE", "CPU", "AGENTS", "ROOM")
 		for _, w := range st.Workers {
 			plat := "-"
 			if w.OS != "" {
@@ -68,8 +71,15 @@ func writeCluster(verb string, result json.RawMessage, out io.Writer) error {
 			if w.MaxAgents > 0 {
 				agents += fmt.Sprintf("/%d", w.MaxAgents)
 			}
-			fmt.Fprintf(out, "%-14s %-13s %-13s %8dM %8dM %8dM %-9s %6s %d\n", nameOr(w.Label, w.ID), w.State, plat,
-				w.TotalMB, w.FreeMB, w.KeepFreeMB, orDash(w.Pressure), agents, w.RoomFor)
+			cpu := fmt.Sprintf("%.0f%%", w.CPUUtilPct)
+			if w.MaxCPUPct > 0 {
+				cpu += fmt.Sprintf("/%.0f", w.MaxCPUPct)
+			}
+			fmt.Fprintf(out, "%-14s %-17s %-13s %8dM %8dM %8dM %-9s %8s %6s %d\n", nameOr(w.Label, w.ID), w.State, plat,
+				w.TotalMB, w.FreeMB, w.KeepFreeMB, orDash(w.Pressure), cpu, agents, w.RoomFor)
+		}
+		for _, r := range st.Recommendations {
+			fmt.Fprintf(out, "recommend: %s\n", r)
 		}
 		fmt.Fprintf(out, "ROOM counts agents of %d MB and %.1f cpu; plan a real batch with: hsched cluster plan --kind <kind> --repo <dir> --count N\n",
 			st.DefaultMemoryMB, st.DefaultCPU)
@@ -84,7 +94,10 @@ func writeCluster(verb string, result json.RawMessage, out io.Writer) error {
 			if j.Worker != "" {
 				where = nameOr(j.WorkerLabel, j.Worker)
 			}
-			fmt.Fprintf(out, "%-8s %-13s %-12s %-8s %-28s %6dM  %s\n", j.Ref, j.Outcome, where, j.Kind, j.Repo, j.MemoryMB, j.Reason)
+			fmt.Fprintf(out, "%-8s %-13s %-12s %-8s %-28s %6dM %4.1fc  %s\n", j.Ref, j.Outcome, where, j.Kind, j.Repo, j.MemoryMB, j.CPU, j.Reason)
+			if j.CPUAfterPct > 0 {
+				fmt.Fprintf(out, "         cpu there with this job: %.0f%% of a %.0f%% limit (cpu estimate: %s)\n", j.CPUAfterPct, j.MaxCPUPct, orDash(j.CPUSource))
+			}
 			for _, w := range j.Warnings {
 				fmt.Fprintf(out, "         warning: %s\n", w)
 			}
@@ -114,14 +127,17 @@ func writeCluster(verb string, result json.RawMessage, out io.Writer) error {
 			}
 			fmt.Fprintf(out, "%3d. %-6s %-8s %-28s %6dM prio %d->%d waited %s%s\n     %s\n", e.Position, e.Job, e.Kind, e.Repo,
 				e.MemoryMB, e.Priority, e.EffectivePriority, (time.Duration(e.WaitingSeconds) * time.Second).String(), held, e.Reason)
+			if e.NextAction != "" {
+				fmt.Fprintf(out, "     next action: %s\n", e.NextAction)
+			}
 		}
 	case "cluster.submit":
 		var rep daemon.ClusterSubmitted
 		if err := json.Unmarshal(result, &rep); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "%s queued: %s in %s, %d MB (%s), %.1f cpu\n", rep.Job.ID, rep.Job.Kind, rep.Job.Repo,
-			rep.Job.MemoryMB, rep.Job.EstimateSource, rep.Job.CPU)
+		fmt.Fprintf(out, "%s queued: %s in %s, %d MB (%s), %.1f cpu (%s)\n", rep.Job.ID, rep.Job.Kind, rep.Job.Repo,
+			rep.Job.MemoryMB, rep.Job.EstimateSource, rep.Job.CPU, orDash(rep.Job.CPUSource))
 		for _, n := range rep.Notes {
 			fmt.Fprintf(out, "  %s\n", n)
 		}
@@ -150,12 +166,25 @@ func writeCluster(verb string, result json.RawMessage, out io.Writer) error {
 			return err
 		}
 		writeClusterJob(out, ex.Job)
+		fmt.Fprintf(out, "  estimates: memory %d MB (%s), cpu %.1f cores (%s)\n", ex.Job.MemoryMB, orDash(ex.Job.EstimateSource), ex.Job.CPU, orDash(ex.Job.CPUSource))
+		if ex.Learned != nil {
+			fmt.Fprintf(out, "  learned: memory %d MB over %d runs, cpu %.2f cores over %d runs\n", ex.Learned.MemoryMB, ex.Learned.MemoryRuns, ex.Learned.CPU, ex.Learned.CPURuns)
+		}
+		for _, dep := range ex.Job.DependsOn {
+			fmt.Fprintf(out, "  depends on %s: %s\n", dep, orDash(ex.Dependencies[dep]))
+		}
+		if ex.Attach != nil {
+			fmt.Fprintf(out, "  attach: %s\n", strings.Join(ex.Attach.Commands, "   then   "))
+		}
 		for _, d := range ex.Decisions {
 			fmt.Fprintf(out, "  %s  %s\n", d.At.Local().Format("2006-01-02 15:04:05"), d.Summary)
 		}
 		if ex.Now != nil {
 			fmt.Fprintf(out, "  now: %s\n", ex.Now.Summary)
 			writeCandidates(out, ex.Now.Candidates)
+			if ex.NextAction != "" {
+				fmt.Fprintf(out, "  next action: %s\n", ex.NextAction)
+			}
 		} else if n := len(ex.Decisions); n > 0 {
 			var d placement.Decision
 			if json.Unmarshal(ex.Decisions[n-1].Detail, &d) == nil && len(d.Candidates) > 0 {
@@ -186,6 +215,38 @@ func writeCluster(verb string, result json.RawMessage, out io.Writer) error {
 			fmt.Fprintf(out, "%6d  %s  %-32s %-6s %-8s %s\n", e.ID, e.At.Local().Format("2006-01-02 15:04:05"), e.Kind,
 				orDash(e.JobID), orDash(e.Worker), compact(e.Detail))
 		}
+	case "cluster.attach":
+		var h coord.AttachHint
+		if err := json.Unmarshal(result, &h); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "%s runs on %s\n", h.Agent, h.Worker)
+		for _, c := range h.Commands {
+			fmt.Fprintf(out, "  %s\n", c)
+		}
+		if h.Note != "" {
+			fmt.Fprintf(out, "note: %s\n", h.Note)
+		}
+	case "cluster.estimates":
+		var rep daemon.EstimatesReport
+		if err := json.Unmarshal(result, &rep); err != nil {
+			return err
+		}
+		if rep.Count == 0 {
+			fmt.Fprintln(out, "nothing learned yet: estimates come from finished cluster jobs")
+			return nil
+		}
+		fmt.Fprintf(out, "p%g of the newest %d runs, before %.0f%% headroom\n", rep.Percentile, rep.Window, rep.HeadroomPct)
+		fmt.Fprintf(out, "%-8s %-34s %9s %5s %7s %5s\n", "KIND", "REPO", "MEMORY", "RUNS", "CPU", "RUNS")
+		for _, p := range rep.Estimates {
+			fmt.Fprintf(out, "%-8s %-34s %8dM %5d %7.2f %5d\n", p.Kind, orDash(p.Repo), p.MemoryMB, p.MemoryRuns, p.CPU, p.CPURuns)
+		}
+	case "cluster.reregister":
+		var c daemon.ClusterWorkerChange
+		if err := json.Unmarshal(result, &c); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "%s will be registered afresh on its next probe\n", c.Worker)
 	case "cluster.metrics":
 		var rep daemon.MetricsReport
 		if err := json.Unmarshal(result, &rep); err != nil {
@@ -217,8 +278,18 @@ func writeClusterJob(out io.Writer, j ledger.Job) {
 		mem += fmt.Sprintf(" using %dM", j.ObservedRSSMB)
 	}
 	fmt.Fprintf(out, "%-6s %-11s %-8s %-28s %-24s %s\n", j.ID, j.State, j.Kind, j.Repo, where, mem)
+	if j.EndReason != "" {
+		fmt.Fprintf(out, "       ended: %s\n", j.EndReason)
+	}
 	if j.LastError != "" {
 		fmt.Fprintf(out, "       %s\n", j.LastError)
+	}
+	if j.Cleanup != "" {
+		note := j.CleanupNote
+		if note == "" {
+			note = "awaiting the retention policy"
+		}
+		fmt.Fprintf(out, "       worktree %s: %s\n", j.Cleanup, note)
 	}
 }
 

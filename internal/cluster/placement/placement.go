@@ -25,7 +25,48 @@ const (
 	StateAuth         = "auth_required"
 	StateIncompatible = "incompatible"
 	StateBackoff      = "backoff"
+	// StateHerdrDown is a worker whose own probe answers but which Herdr's
+	// `machine status` reports as not reachable, so a dispatch through
+	// `herdr --machine` would fail.
+	StateHerdrDown = "herdr_unreachable"
 )
+
+// Swap pressure levels for MaxSwapPressure, from calm to thrashing, judged
+// on pages swapped out per second over the probe's sample.
+const (
+	SwapNone     = "none"
+	SwapLow      = "low"
+	SwapModerate = "moderate"
+	SwapHigh     = "high"
+)
+
+// SwapLevels lists the levels in order.
+var SwapLevels = []string{SwapNone, SwapLow, SwapModerate, SwapHigh}
+
+// SwapLevel classifies a swap-out rate. A negative rate is unknown, "".
+func SwapLevel(outPerSec float64) string {
+	switch {
+	case outPerSec < 0:
+		return ""
+	case outPerSec < 1:
+		return SwapNone
+	case outPerSec < 50:
+		return SwapLow
+	case outPerSec < 500:
+		return SwapModerate
+	default:
+		return SwapHigh
+	}
+}
+
+func swapRank(l string) int {
+	for i, x := range SwapLevels {
+		if x == l {
+			return i
+		}
+	}
+	return -1
+}
 
 // Settings are the operator's limits for one worker.
 type Settings struct {
@@ -53,11 +94,24 @@ type Settings struct {
 	// Agents, when set, is the authoritative list of agent kinds here and
 	// overrides what the probe found on PATH.
 	Agents []string `json:"agents,omitempty"`
+	// MaxCPUUtilPct refuses a job when the worker's measured CPU use plus
+	// what is committed and not yet visible plus this job would pass it.
+	// Zero means the default; a negative value turns the check off.
+	MaxCPUUtilPct float64 `json:"max_cpu_utilisation_percent"`
+	// MemoryReservePct keeps this share of total memory free for the
+	// operating system and other applications, on top of MinFreeMemoryMB
+	// (the larger of the two applies). Zero turns it off.
+	MemoryReservePct float64 `json:"memory_reserve_percent"`
+	// MaxSwapPressure is the worst swap activity (none, low, moderate,
+	// high) at which new work is still admitted. Empty means the default,
+	// moderate, so only heavy swapping refuses work.
+	MaxSwapPressure string `json:"max_swap_pressure,omitempty"`
 }
 
 // DefaultSettings are used for anything the operator did not set.
 func DefaultSettings() Settings {
-	return Settings{MinFreeMemoryMB: 2048, MaxCPUCommit: 1.0, MaxLoadPerCore: 2.0, MinFreeDiskGB: 5, Weight: 1}
+	return Settings{MinFreeMemoryMB: 2048, MaxCPUCommit: 1.0, MaxLoadPerCore: 2.0, MinFreeDiskGB: 5, Weight: 1,
+		MaxCPUUtilPct: 85, MaxSwapPressure: SwapModerate}
 }
 
 // Worker is one machine as placement sees it.
@@ -78,6 +132,17 @@ type Worker struct {
 	PendingMemoryMB int64 `json:"pending_memory_mb"`
 	// CommittedCPU is the sum of CPU estimates of every job here.
 	CommittedCPU float64 `json:"committed_cpu"`
+	// PendingCPU is the part of CommittedCPU the utilisation reading does
+	// not show yet (jobs still starting, and estimates above what agents
+	// are observed using). For a static worker it is all of it.
+	PendingCPU float64 `json:"pending_cpu"`
+	// CPUUtilPct is the coordinator's smoothed CPU utilisation, so one busy
+	// quarter-second sample does not swing admission. Zero means use the
+	// snapshot's own reading.
+	CPUUtilPct float64 `json:"cpu_util_smoothed_pct,omitempty"`
+	// ClusterRepos counts active jobs per repository across all workers,
+	// for the per-repository concurrency limit.
+	ClusterRepos map[string]int `json:"-"`
 	// RunningRepos counts active jobs per repository here.
 	RunningRepos map[string]int `json:"running_repos,omitempty"`
 	// HeldFor names a queued job this worker is being kept clear for by the
@@ -97,6 +162,16 @@ type Job struct {
 	Labels   []string `json:"labels,omitempty"`
 	OS       string   `json:"os,omitempty"`
 	Arch     string   `json:"arch,omitempty"`
+	// ExclusiveRepo is set when a worktree cannot be made for this job (the
+	// repository has no commits), so it may only run where no other job is
+	// using the repository.
+	ExclusiveRepo bool `json:"exclusive_repo,omitempty"`
+	// MaxPerRepo caps active jobs in this job's repository across the whole
+	// cluster. Zero means no cap.
+	MaxPerRepo int `json:"max_per_repo,omitempty"`
+	// Cloneable means the repository will be cloned onto a worker that does
+	// not have it, so a missing checkout is not a hard constraint.
+	Cloneable bool `json:"cloneable,omitempty"`
 }
 
 // Candidate is one worker's part in a decision.
@@ -110,6 +185,10 @@ type Candidate struct {
 	Factors  map[string]float64 `json:"factors,omitempty"`
 	// FreeAfterMB is memory left after this job, before the safety margin.
 	FreeAfterMB int64 `json:"free_after_mb"`
+	// CPUAfterPct is the projected CPU utilisation with this job, against
+	// MaxCPUPct.
+	CPUAfterPct float64 `json:"cpu_after_pct"`
+	MaxCPUPct   float64 `json:"max_cpu_pct,omitempty"`
 }
 
 // Decision is the answer for one job.
@@ -148,7 +227,51 @@ func (w Worker) Effective() Settings {
 	if s.Weight > 2 {
 		s.Weight = 2
 	}
+	switch {
+	case s.MaxCPUUtilPct == 0:
+		s.MaxCPUUtilPct = d.MaxCPUUtilPct
+	case s.MaxCPUUtilPct < 0:
+		s.MaxCPUUtilPct = 0 // off
+	}
+	if s.MaxSwapPressure == "" {
+		s.MaxSwapPressure = d.MaxSwapPressure
+	}
 	return s
+}
+
+// KeepFreeMB is the memory that must stay free here: the larger of the fixed
+// floor and the reserve share of total memory.
+func (w Worker) KeepFreeMB() int64 {
+	s := w.Effective()
+	keep := s.MinFreeMemoryMB
+	if s.MemoryReservePct > 0 && w.Snapshot.Memory.TotalMB > 0 {
+		if pct := int64(math.Ceil(float64(w.Snapshot.Memory.TotalMB) * s.MemoryReservePct / 100)); pct > keep {
+			keep = pct
+		}
+	}
+	return keep
+}
+
+// UtilPct is the CPU utilisation placement works from: the smoothed figure
+// when the coordinator has one, else the snapshot's. A declared (static)
+// worker has no measurement, so it is zero and PendingCPU carries the load.
+func (w Worker) UtilPct() float64 {
+	if w.Snapshot.CPU.UtilSource == "declared" {
+		return 0
+	}
+	if w.CPUUtilPct > 0 {
+		return w.CPUUtilPct
+	}
+	return w.Snapshot.CPU.UtilPct
+}
+
+// CPUAfterPct is the projected utilisation once job runs here.
+func (w Worker) CPUAfterPct(job Job) float64 {
+	cores := w.Cores()
+	if cores <= 0 {
+		return 0
+	}
+	return w.UtilPct() + (w.PendingCPU+job.CPU)/float64(cores)*100
 }
 
 // FreeMemoryMB is what this worker can still hand out, before the margin.
@@ -196,12 +319,22 @@ func Static(job Job, w Worker) []string {
 	if len(s.Agents) > 0 && job.Kind != "" && !contains(s.Agents, job.Kind) {
 		r = append(r, fmt.Sprintf("agent %s is not offered on this worker", job.Kind))
 	}
-	if job.Repo != "" && w.Snapshot.Paths != nil {
+	if job.Repo != "" && w.Snapshot.Paths != nil && !job.Cloneable {
 		if present, asked := w.Snapshot.Paths[job.Repo]; asked && !present {
 			r = append(r, fmt.Sprintf("repository %s does not exist on this worker", job.Repo))
 		}
 	}
 	return r
+}
+
+// transient says whether a worker state can clear by itself, so a job that
+// only fails on it is still worth queueing.
+func transient(state string) bool {
+	switch state {
+	case StateDraining, StateUnreachable, StateBackoff, StateAuth, StateHerdrDown:
+		return true
+	}
+	return false
 }
 
 // Eligible returns every hard constraint the worker breaks for this job. An
@@ -217,9 +350,18 @@ func Eligible(job Job, w Worker) []string {
 		r = append(r, "no memory reading")
 	} else {
 		free := w.FreeMemoryMB() - job.MemoryMB
-		if free < s.MinFreeMemoryMB {
-			r = append(r, fmt.Sprintf("memory: %d MB free after this job, needs %d MB kept free", free, s.MinFreeMemoryMB))
+		if keep := w.KeepFreeMB(); free < keep {
+			r = append(r, fmt.Sprintf("memory: insufficient unreserved memory (%d MB free after this job, needs %d MB kept free)", free, keep))
 		}
+	}
+	if lvl := SwapLevel(snap.Memory.SwapOutPerSec); lvl != "" && swapRank(s.MaxSwapPressure) >= 0 && swapRank(lvl) > swapRank(s.MaxSwapPressure) {
+		r = append(r, fmt.Sprintf("swap pressure is %s (%.0f pages/s out), above the %s limit", lvl, snap.Memory.SwapOutPerSec, s.MaxSwapPressure))
+	}
+	if job.ExclusiveRepo && job.Repo != "" && w.RunningRepos[job.Repo] > 0 {
+		r = append(r, "repository has no commits, so no worktree can be made, and another job is using its checkout here")
+	}
+	if job.MaxPerRepo > 0 && job.Repo != "" && w.ClusterRepos[job.Repo] >= job.MaxPerRepo {
+		r = append(r, fmt.Sprintf("repository already has %d of at most %d agents across the cluster", w.ClusterRepos[job.Repo], job.MaxPerRepo))
 	}
 	if snap.Memory.Pressure == resource.PressureCritical {
 		r = append(r, "memory pressure is critical")
@@ -227,6 +369,11 @@ func Eligible(job Job, w Worker) []string {
 	if cores := w.Cores(); cores > 0 {
 		if w.CommittedCPU+job.CPU > float64(cores)*s.MaxCPUCommit+1e-9 {
 			r = append(r, fmt.Sprintf("cpu: %.1f of %.1f committable cores would be committed", w.CommittedCPU+job.CPU, float64(cores)*s.MaxCPUCommit))
+		}
+		if s.MaxCPUUtilPct > 0 {
+			if after := w.CPUAfterPct(job); after > s.MaxCPUUtilPct+1e-9 {
+				r = append(r, fmt.Sprintf("cpu: utilisation exceeds policy threshold (%.0f%% with this job, limit %.0f%%)", after, s.MaxCPUUtilPct))
+			}
 		}
 		if s.MaxLoadPerCore > 0 && snap.CPU.Load5/float64(cores) > s.MaxLoadPerCore {
 			r = append(r, fmt.Sprintf("cpu: 5-minute load %.1f per core is above %.1f", snap.CPU.Load5/float64(cores), s.MaxLoadPerCore))
@@ -252,12 +399,20 @@ func Eligible(job Job, w Worker) []string {
 // Place decides where a job goes.
 func Place(job Job, workers []Worker) Decision {
 	policy := job.Policy
+	why := ""
+	if policy == PolicyAdaptive {
+		policy, why = ResolveAdaptive(workers)
+	}
 	if _, ok := Policies[policy]; !ok {
 		policy = PolicyBalanced
 	}
 	d := Decision{JobID: job.ID, Policy: policy}
+	if why != "" {
+		d.Policy = PolicyAdaptive + ":" + policy
+	}
 	for _, w := range workers {
-		c := Candidate{WorkerID: w.ID, Label: w.Label, FreeAfterMB: w.FreeMemoryMB() - job.MemoryMB}
+		c := Candidate{WorkerID: w.ID, Label: w.Label, FreeAfterMB: w.FreeMemoryMB() - job.MemoryMB,
+			CPUAfterPct: math.Round(w.CPUAfterPct(job)*10) / 10, MaxCPUPct: w.Effective().MaxCPUUtilPct}
 		c.Reasons = Eligible(job, w)
 		c.Eligible = len(c.Reasons) == 0
 		c.Warnings = warnings(job, w)
@@ -295,6 +450,9 @@ func Place(job Job, workers []Worker) Decision {
 			d.Summary += " (" + strings.Join(parts, " | ") + ")"
 		}
 	}
+	if why != "" {
+		d.Summary += "; adaptive policy chose " + policy + " because " + why
+	}
 	return d
 }
 
@@ -307,7 +465,7 @@ func Nearest(job Job, workers []Worker) string {
 		if len(Static(job, w)) > 0 {
 			continue
 		}
-		if w.Snapshot.Memory.TotalMB-w.Effective().MinFreeMemoryMB < job.MemoryMB {
+		if w.Snapshot.Memory.TotalMB-w.KeepFreeMB() < job.MemoryMB {
 			// Bigger than the machine: waiting will never help.
 			continue
 		}
@@ -325,14 +483,18 @@ func FitsAnywhereEver(job Job, workers []Worker) (bool, []string) {
 	var why []string
 	for _, w := range workers {
 		if r := Static(job, w); len(r) > 0 {
-			if !(len(r) == 1 && (w.State == StateDraining || w.State == StateUnreachable || w.State == StateBackoff || w.State == StateAuth)) {
+			if !(len(r) == 1 && transient(w.State)) {
 				why = append(why, nameOfW(w)+": "+strings.Join(r, "; "))
 				continue
 			}
 		}
 		s := w.Effective()
-		if w.Snapshot.Memory.TotalMB > 0 && w.Snapshot.Memory.TotalMB-s.MinFreeMemoryMB < job.MemoryMB {
-			why = append(why, fmt.Sprintf("%s: %d MB total, job needs %d MB plus %d MB kept free", nameOfW(w), w.Snapshot.Memory.TotalMB, job.MemoryMB, s.MinFreeMemoryMB))
+		if w.Snapshot.Memory.TotalMB > 0 && w.Snapshot.Memory.TotalMB-w.KeepFreeMB() < job.MemoryMB {
+			why = append(why, fmt.Sprintf("%s: %d MB total, job needs %d MB plus %d MB kept free", nameOfW(w), w.Snapshot.Memory.TotalMB, job.MemoryMB, w.KeepFreeMB()))
+			continue
+		}
+		if c := w.Cores(); c > 0 && s.MaxCPUUtilPct > 0 && job.CPU/float64(c)*100 > s.MaxCPUUtilPct {
+			why = append(why, fmt.Sprintf("%s: job asks for %.1f cores, more than %.0f%% of %d cores", nameOfW(w), job.CPU, s.MaxCPUUtilPct, c))
 			continue
 		}
 		if c := w.Cores(); c > 0 && job.CPU > float64(c)*s.MaxCPUCommit {
@@ -361,6 +523,11 @@ func warnings(job Job, w Worker) []string {
 	}
 	if w.Snapshot.Backend == resource.BackendStatic {
 		out = append(out, "capacity is declared, not measured")
+	}
+	if job.Cloneable && job.Repo != "" && w.Snapshot.Paths != nil {
+		if present, asked := w.Snapshot.Paths[job.Repo]; asked && !present {
+			out = append(out, fmt.Sprintf("repository %s is not here and will be cloned first", job.Repo))
+		}
 	}
 	return out
 }

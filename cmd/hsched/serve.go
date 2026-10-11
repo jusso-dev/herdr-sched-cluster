@@ -156,6 +156,7 @@ func openCluster(cfg *config.Config) *daemon.Cluster {
 	}
 	prober := coord.DefaultProber{SSH: transport.SSH{Timeout: set.ProbeTimeout}}
 	c := coord.New(l, herdrx.New(), prober, set.Coord)
+	c.G = coord.DefaultGitOps{SSH: transport.SSH{Timeout: set.ProbeTimeout}}
 	log.Printf("cluster scheduler on: ledger %s, policy %s, tick %s", l.Path, set.Coord.Policy, set.Tick)
 	return &daemon.Cluster{Coord: c, Tick: set.Tick, MetricsAddr: set.MetricsAddr}
 }

@@ -24,6 +24,19 @@ in [docs/IMPLEMENTATION-CHECKLIST.md](docs/IMPLEMENTATION-CHECKLIST.md).
 
 ## Install
 
+### Quick start with your coding agent
+
+The fastest way to get going is to let your coding agent do the setup. Copy
+the prompt in [docs/AGENT-SETUP-PROMPT.md](docs/AGENT-SETUP-PROMPT.md) into
+Claude Code, Codex or OpenCode on the machine you will submit work from. It
+checks the prerequisites, installs and starts the plugin, connects your
+agents to the scheduler, helps you add and check your other machines, maps
+repository paths where they differ, and finishes with a dry-run plan. It
+asks before touching SSH keys, other machines or running work, and it never
+submits a real job.
+
+To do it by hand instead, follow the rest of this section.
+
 You need Herdr 0.9.2 or later on every machine and key-based SSH from the
 coordinator (the machine you submit from) to each worker. Go is optional: with
 Go installed the plugin is compiled from source, and without it the matching
@@ -39,7 +52,7 @@ herdr plugin install jusso-dev/herdr-sched-cluster
 ```
 
 Herdr shows a preview and asks before installing; add `--yes` to skip the
-question. The preview should say `id: herdr-sched`, `version: 0.4.0` and
+question. The preview should say `id: herdr-sched`, `version: 0.5.0` and
 `build: ./scripts/build.sh`. Then start the daemon. A running Herdr server only
 runs startup hooks when it next starts, so either restart Herdr or run:
 
@@ -50,7 +63,7 @@ herdr plugin action invoke herdr-sched.restart
 Check it:
 
 ```sh
-hsched version                  # hsched 0.4.0 (herdr-sched)
+hsched version                  # hsched 0.5.0 (herdr-sched)
 hsched doctor                   # socket, state and config paths, gate
 hsched cluster status           # every worker and how much room it has
 ```
@@ -148,6 +161,19 @@ shows `unreachable` or `auth_required` with the SSH error when the probe
 fails, then `backoff` while it waits to retry. A machine you disable in Herdr
 shows `disabled`.
 
+Herdr's own health check is part of placement too. Every
+`cluster_machine_status_seconds` (default 60) the coordinator reads
+`herdr machine status`, and a saved machine whose Herdr server cannot be
+reached shows `herdr_unreachable` and takes nothing, even when SSH to it still
+works. One whose Herdr asks for authentication shows `auth_required`.
+
+The first successful probe records each worker's identity (hostname, OS and
+architecture). If a later probe reports a different machine under
+the same name, the worker shows `incompatible` and takes nothing until you
+accept the change with `hsched cluster reregister <worker>` (gated as
+`sched.cluster.reregister`). `cluster_verify_identity = false` turns the check
+off.
+
 A machine that cannot run the probe, such as a Windows machine, can still
 take agents if Herdr can drive it: declare its capacity in
 `~/.config/sched/cluster-workers.json` with `"probe": "static"`. It is then
@@ -157,7 +183,11 @@ reserved there, not against live readings.
 ```json
 {
   "local": { "max_agents": 6, "weight": 1.2 },
-  "mini": { "max_agents": 3, "min_free_memory_mb": 3072, "labels": ["arm"] },
+  "mini": {
+    "max_agents": 3, "min_free_memory_mb": 3072, "labels": ["arm"],
+    "max_cpu_utilisation_percent": 75, "memory_reserve_percent": 10,
+    "path_map": { "~/src": "/Volumes/work/src" }
+  },
   "winbox": {
     "probe": "static", "os": "windows", "arch": "amd64",
     "memory_mb": 32768, "cores": 8, "agents": ["codex", "claude"]
@@ -168,11 +198,19 @@ reserved there, not against live readings.
 Keys are a Herdr machine id or label, or `local`. Per-worker fields are
 `probe` (`auto`, `static` or `off`), `program` (the remote `hsched` for this
 worker), `max_agents`, `min_free_memory_mb`, `max_cpu_commit`,
-`max_load_per_core`, `min_free_disk_gb`, `min_battery_pct`, `weight` (a
-preference, higher is preferred), `labels`, `agents` (when set, the only
-agent kinds this worker may run), and for static workers `os`, `arch`,
-`memory_mb` and `cores`. An unknown field is an error, so a typo cannot be
-silently ignored.
+`max_load_per_core`, `min_free_disk_gb`, `min_battery_pct`,
+`max_cpu_utilisation_percent`, `memory_reserve_percent`, `max_swap_pressure`,
+`weight` (a preference, higher is preferred), `labels`, `agents` (when set,
+the only agent kinds this worker may run), `path_map`, and for static workers
+`os`, `arch`, `memory_mb` and `cores`. An unknown field is an error, so a typo
+cannot be silently ignored.
+
+`path_map` rewrites repository paths for one worker. A job names the path as
+you know it (`~/src/app`), and on `mini` above it runs in
+`/Volumes/work/src/app`. The longest matching prefix wins, and a prefix only
+matches whole path segments, so `~/src` does not rewrite `~/srcx`. The job,
+its explanation and its events keep the path you submitted; the worker sees
+the mapped one.
 
 ## Running agents on the cluster
 
@@ -199,8 +237,18 @@ hsched cluster drain mini         # no new agents on mini; running ones carry on
 hsched cluster undrain mini
 hsched cluster cancel j14         # a job that has not started yet
 hsched cluster detach j12         # stop counting a running agent; it keeps running
+hsched cluster attach j12         # the Herdr command that opens j12's agent
+hsched cluster estimates          # what earlier agents used, per kind and repository
+hsched cluster reregister mini    # accept mini's new identity after a rebuild
 hsched cluster events             # reservations, dispatches, failures, overruns
 hsched cluster metrics            # Prometheus text
+
+# Run after j3 and j4 finish; clone the repository where it is missing.
+hsched cluster submit codex ~/src/api --depends_on j3,j4 \
+  --clone_url git@github.com:you/api.git --prompt "Integrate both fixes"
+
+# Safe to start again if lost; may be closed under memory pressure.
+hsched cluster submit claude ~/src/app --restartable --disposable
 ```
 
 The repository path is a path on the worker, absolute or starting with `~/`
@@ -212,31 +260,100 @@ not exist on a worker rules that worker out, and `explain` says so.
 `copilot`, `cursor`, `droid`, `gemini`, `grok`, `kiro`, `opencode`, `pi`,
 `qwen` and the others Herdr detects.
 
+With `--clone_url`, a worker that does not have the repository is no longer
+ruled out: the scheduler clones the URL to the job's path there first (over
+SSH, through `hsched cluster gitop` on the worker), and the job fails with
+the Git error if the clone does. URLs carrying credentials are refused.
+
+`--depends_on` holds a job until every job it names has finished. If one of
+them fails, is cancelled or is lost, the dependent job fails too, with that
+job named in the reason.
+
 What happens to a job:
 
 1. `submit` checks the request and refuses a job no worker could ever run,
-   with the reason for each worker. Without `--memory_mb`, the estimate is
-   learned from earlier agents of the same kind in the same repository, then
-   the same kind anywhere, then `cluster_default_memory_mb`.
+   with the reason for each worker, and refuses any job once
+   `cluster_max_queue_size` jobs already wait. Without `--memory_mb`, the
+   estimate is learned from the last `cluster_history_window` runs of the same
+   kind in the same repository, then the same kind anywhere, then
+   `cluster_default_memory_mb`. The learned figure is the
+   `cluster_history_percentile` (90th by default) of each run's peak, plus
+   `cluster_history_headroom_pct`. Without `--cpu`, the CPU estimate is
+   learned the same way from each run's process-tree CPU use.
 2. Each pass orders the queue by priority plus ageing, and places each job on
    the best eligible worker. Hard constraints always win over the score: a
-   worker is ruled out for memory below `min_free_memory_mb` after the job,
-   critical memory pressure, CPU over-commitment, load per core, low disk, low
-   battery, critical thermal state, `max_agents`, a pin, labels, OS or
-   architecture, a missing repository or a declared agent list. The score
-   then ranks what is left according to the policy (`balanced`, `memory`,
-   `performance`, `pack`, `spread` or `local-first`).
+   worker is ruled out for memory below `min_free_memory_mb` (or
+   `memory_reserve_percent` of its memory, whichever is larger) after the job,
+   critical memory pressure, swapping above `max_swap_pressure`, CPU
+   utilisation above `max_cpu_utilisation_percent` once the job's CPU is
+   added, CPU over-commitment, load per core, low disk, low battery, critical
+   thermal state, `max_agents`, a pin, labels, OS or architecture, a missing
+   repository (unless it can be cloned), a declared agent list, Herdr being
+   unreachable, or `cluster_max_agents_per_repo` agents already in that
+   repository. The score then ranks what is left according to the policy
+   (`balanced`, `memory`, `performance`, `pack`, `spread`, `local-first` or
+   `adaptive`). `adaptive` picks one of the others each pass: `memory` when a
+   worker reports memory pressure or less than 30% of the cluster's memory is
+   unreserved, `performance` when every ready worker is idle, otherwise
+   `balanced`, and `explain` says which and why.
 3. Capacity is reserved in the SQLite ledger inside one transaction that
    re-checks the worker's load, so two submissions racing for the last
    gigabytes cannot both win.
 4. On the chosen machine the scheduler runs `herdr --machine <id> workspace
    create` (or `worktree create` when another job already holds that
    repository there), then `agent start hsc-<job>` and `agent prompt`.
-5. Every tick it reconciles with `herdr agent list` on each worker: a running
-   job whose agent has gone is finished, an unreachable worker marks its jobs
-   disconnected but keeps their reservations, and the agent's process tree is
-   measured. An agent using more than it reserved has its reservation raised
-   to what it uses plus `cluster_overrun_margin_pct`. Nothing is ever killed.
+5. Every tick it reconciles with `herdr agent list` on each worker, and
+   measures each agent's process tree. An agent using more than it reserved
+   has its reservation raised to what it uses plus
+   `cluster_overrun_margin_pct`. When an agent is no longer listed, the
+   scheduler asks Herdr about the pane it ran in, and tells the cases apart:
+
+   | What it finds | Job ends as | Reason |
+   | --- | --- | --- |
+   | The pane is there with the same shell | `finished` | `agent_exited` |
+   | The pane is there with a new shell (Herdr restarted) | `lost` | `herdr_restarted` |
+   | The pane is gone | `lost` | `session_vanished` |
+   | The worker has been unreachable for `cluster_lost_after_seconds` | `lost` | `worker_unreachable` |
+
+   A worker that is unreachable for less than that marks its jobs
+   `disconnected` and keeps their reservations. A `worker_unreachable` job
+   whose agent shows up again is taken back as running. A lost job is never
+   started again unless it was submitted with `--restartable`,
+   `cluster_retry_lost` is on (the default), and the pane it ran in has
+   nothing but its shell in the foreground, since anything else may be the
+   agent carrying on by itself.
+
+6. When a job ends, its worktree is dealt with according to
+   `cluster_worktree_retention`: `retain-on-failure` (the default) removes the
+   worktree of a job that finished and keeps the others for you to inspect,
+   `always-retain` keeps every one, `always-remove` removes every one, and
+   `age` removes any once it is `cluster_worktree_max_age_hours` old. Removal
+   goes through `herdr worktree remove`, which refuses a worktree with
+   uncommitted changes unless `cluster_worktree_remove_dirty` is on, and then
+   closes the workspace. The branch (`hsc/j<id>`) is kept unless
+   `cluster_delete_branches` is on, and even then Git's `branch -d` keeps a
+   branch that is not merged, so unmerged work is never lost. A worktree that could not be removed is
+   kept, with the reason in the job, `explain` and the event trail.
+
+Under sustained critical memory pressure (`cluster_pressure_grace_seconds`,
+default 120), `cluster status` recommends what to do, such as draining the
+worker or which jobs to move. With `cluster_pressure_action =
+"terminate-disposable"` the scheduler also closes the workspace of the
+largest job submitted with `--disposable` on that worker, at most one per
+grace period, and records it with reason `terminated_under_pressure`: as
+`failed`, or back in the queue if it was also `--restartable` and has
+attempts left. Nothing else is ever killed.
+
+If the coordinator stops in the middle of a dispatch, the next run decides
+what happened. If it had not yet asked Herdr to start the agent, any
+half-made workspace is found by its label and closed, and the job goes back
+to the queue. If it had asked, the agent may already be running somewhere
+the scheduler cannot see, so the job fails with `dispatch_interrupted`
+rather than risk starting it twice.
+
+A repository with no commits cannot have a worktree. A job that needs one
+there fails with `empty_repository` and a message saying to make a first
+commit, instead of retrying forever.
 
 A big job that keeps losing to smaller ones is protected: once it has waited
 `cluster_starvation_minutes`, the worker nearest to fitting it is held clear
@@ -312,9 +429,10 @@ five fixes across my machines" and the agent will:
    `cluster_explain`.
 
 The read-only tools are `cluster_status`, `cluster_plan`, `cluster_workers`,
-`cluster_queue`, `cluster_jobs`, `cluster_explain`, `cluster_events` and
-`cluster_metrics`. The ones that change something are `cluster_submit`,
-`cluster_cancel`, `cluster_detach`, `cluster_drain` and `cluster_undrain`, and
+`cluster_queue`, `cluster_jobs`, `cluster_explain`, `cluster_attach`,
+`cluster_estimates`, `cluster_events` and `cluster_metrics`. The ones that
+change something are `cluster_submit`, `cluster_cancel`, `cluster_detach`,
+`cluster_drain`, `cluster_undrain` and `cluster_reregister`, and
 each can be held for your approval by the policy gate. The skill tells the
 agent never to get round a hard limit by pinning work to a full machine or
 understating memory, and to ask before draining or cancelling.
@@ -781,10 +899,31 @@ cluster_min_battery_pct = 0            # on battery below this, take nothing; 0 
 cluster_max_agents = 0                 # per worker; 0 is no limit
 cluster_workers_file = "~/.config/sched/cluster-workers.json"
 cluster_metrics_addr = "off"           # e.g. "127.0.0.1:9464" to serve /metrics; loopback only
+cluster_history_window = 20            # learn estimates from this many recent runs
+cluster_history_percentile = 90        # which percentile of those runs' peaks to use
+cluster_max_cpu_utilisation_percent = 85  # per worker; take nothing above this CPU use; negative is off
+cluster_memory_reserve_percent = 0     # per worker; keep this share of memory free as well
+cluster_max_swap_pressure = "moderate" # per worker; none, low, moderate or high
+cluster_max_agents_per_repo = 0        # active agents in one repository across the cluster; 0 is no limit
+cluster_max_queue_size = 100           # refuse submits once this many jobs wait
+cluster_queue_enabled = true           # false refuses every submit; running jobs carry on
+cluster_worktree_retention = "retain-on-failure"  # retain-on-failure, always-retain, always-remove or age
+cluster_worktree_max_age_hours = 72    # with "age", remove worktrees this old
+cluster_worktree_remove_dirty = false  # remove worktrees with uncommitted changes too
+cluster_delete_branches = false        # also delete the scheduler branch (only if merged) after removing its worktree
+cluster_lost_after_seconds = 1800      # unreachable this long, a worker's jobs are lost
+cluster_retry_lost = true              # retry lost jobs submitted with --restartable
+cluster_machine_status_seconds = 60    # how often to read herdr machine status; 0 is off
+cluster_pressure_action = "recommend"  # recommend, or terminate-disposable
+cluster_pressure_grace_seconds = 120   # critical pressure lasting this long counts as sustained
+cluster_verify_identity = true         # stop placing on a worker whose identity changed
+cluster_owner_checks = true            # only a job's submitter (or you) may cancel or detach it
+cluster_explanations = true            # keep a placement explanation per job
 ```
 
-The worker defaults (`cluster_min_free_memory_mb` through `cluster_max_agents`)
-apply to every worker unless `cluster-workers.json` says otherwise for that
+The worker defaults (`cluster_min_free_memory_mb` through `cluster_max_agents`,
+and `cluster_max_cpu_utilisation_percent`, `cluster_memory_reserve_percent`
+and `cluster_max_swap_pressure`) apply to every worker unless `cluster-workers.json` says otherwise for that
 worker. A value that does not parse stops the cluster scheduler, with the
 reason in the log and in every cluster verb's refusal, while cron jobs and
 triggers carry on.
@@ -886,7 +1025,17 @@ error, so it can be leaned on.
   a ledger file other users can read is refused at start.
 - Mutating cluster verbs go through the same policy gate as everything else:
   `sched.cluster.submit`, `sched.cluster.cancel`, `sched.cluster.detach`,
-  `sched.cluster.drain` and `sched.cluster.undrain`.
+  `sched.cluster.drain`, `sched.cluster.undrain` and
+  `sched.cluster.reregister`.
+- Each job records who submitted it (the human, or a cron, trigger or agent
+  principal), and with `cluster_owner_checks` on only that principal or the
+  human can cancel or detach it. This stops one agent cancelling another's
+  work by mistake; it is not a security boundary, because anyone who can
+  reach the `0600` socket is already you.
+- Clone URLs are refused if they carry credentials, start with `-`, or use a
+  transport other than https, ssh or scp-style `user@host:path`. Git
+  operations on a worker run `hsched cluster gitop` with quoted, checked
+  arguments over SSH, never a shell string.
 - No telemetry. The metrics endpoint is off by default and only binds a
   loopback address.
 
@@ -901,30 +1050,28 @@ Be clear about what this does not do yet:
 - **Windows has no live collector.** Declare a Windows worker as static.
   Placement then uses declared capacity and the scheduler's own reservations,
   not live readings.
-- **Finished versus lost.** When an agent disappears from `herdr agent list`
-  the job is recorded as finished. If the worker's Herdr server restarted,
-  its agents are gone too (Herdr does not keep processes across a server
-  restart), and that is also recorded as finished rather than lost.
-- **At most once, not exactly once.** If the coordinator stops after asking a
-  worker to start an agent but before hearing back, and the agent is not
-  running when it checks again, the job is failed rather than retried, since
-  it may already have run. Resubmit it if needed.
-- **Herdr's machine health check is not used for placement.** Health comes
-  from the scheduler's own SSH probe, which is one round trip instead of two.
-- **No live migration.** A running agent stays where it started.
+- **At most once, not exactly once.** A job whose dispatch was interrupted
+  after the agent start was requested fails with `dispatch_interrupted`
+  rather than being retried, since it may already be running. Resubmit it if
+  needed. One interrupted before that point is cleaned up and requeued.
+- **No graceful stop.** Herdr 0.9.3 has no `agent stop`, so terminating a
+  disposable job under pressure closes its workspace. There is no pause.
+- **No live migration or checkpoints.** A running agent stays where it
+  started. Herdr does not expose agent sessions in a form another machine can
+  resume, so to move work, `detach` it and submit it again, or submit it as
+  `--restartable` so a lost run starts afresh elsewhere.
+- **Only the agent kinds Herdr knows.** `herdr agent start` takes a fixed
+  `--kind`, so an arbitrary command line cannot be scheduled as an agent.
+- **Attach is a command, not a connection.** Herdr will not attach to an
+  agent across `--machine`, so `cluster attach` prints the commands to run:
+  `herdr --remote <ssh target>` to open the worker's Herdr, then
+  `herdr agent focus hsc-j<id>` inside it.
 - **Polling, not events.** The scheduler reconciles on a timer
   (`cluster_tick_seconds`). Herdr's event subscription is not durable across
   restarts, so it is not relied on.
-- **Repository paths must match across machines** (or be under `~/` with the
-  same layout). There is no per-worker path mapping yet.
 - **A plan is a snapshot.** `cluster plan` uses the same readings and rules
   as a real pass, but memory moves, so a job planned to start now can still
   queue a few seconds later, and the other way round.
-- **Worktrees need a commit.** When a second agent shares a repository on a
-  machine, it gets a Herdr worktree, and Git cannot make one in a repository
-  with no commits yet. The job goes back to the queue with that error and
-  starts once the repository has a commit. Worktrees are left in place when
-  the agent finishes, since they hold its work.
 - **Prometheus metrics are a text endpoint and a CLI verb only.** There is no
   bundled Grafana dashboard.
 - **GitHub Actions CI** is described in [docs/ci/ci.yml](docs/ci/ci.yml) but

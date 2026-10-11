@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/gitop"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/resource"
 )
 
@@ -210,6 +211,61 @@ func (s SSH) Probe(ctx context.Context, target, program string, req resource.Req
 		lat = 0
 	}
 	return Result{Snapshot: snap, LatencyMS: lat.Milliseconds()}, nil
+}
+
+// GitOpWords renders a typed Git operation as the remote command, every
+// word allow-listed and quoted as RemoteWords does.
+func GitOpWords(program string, r gitop.Request) ([]string, error) {
+	if err := ValidatePath(program); err != nil && !bareProgram(program) {
+		return nil, fmt.Errorf("probe program: %w", err)
+	}
+	if err := r.Validate(); err != nil {
+		return nil, err
+	}
+	words := []string{quote(program)}
+	for _, w := range r.Words() {
+		if strings.ContainsAny(w, "'\\\n$`;|&<>(){}*?!\"") {
+			return nil, fmt.Errorf("git operation word %q has a shell-active character", w)
+		}
+		words = append(words, quote(w))
+	}
+	return words, nil
+}
+
+// GitOp runs a typed Git operation on target over SSH, with the same fixed
+// options the probe uses.
+func (s SSH) GitOp(ctx context.Context, target, program string, r gitop.Request) (gitop.Result, error) {
+	if err := ValidateTarget(target); err != nil {
+		return gitop.Result{}, err
+	}
+	words, err := GitOpWords(program, r)
+	if err != nil {
+		return gitop.Result{}, err
+	}
+	bin := s.Binary
+	if bin == "" {
+		bin = "ssh"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 11*time.Minute)
+	defer cancel()
+	argv := append([]string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5",
+		"-o", "ServerAliveCountMax=2", "--", target}, words...)
+	cmd := exec.CommandContext(ctx, bin, argv...)
+	var stdout, stderr limited
+	stdout.max, stderr.max = 64<<10, 4096
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil && stdout.Len() == 0 {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return gitop.Result{}, &Error{Target: target, Message: msg, Auth: authFailure(msg)}
+	}
+	var res gitop.Result
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		return gitop.Result{}, &Error{Target: target, Message: "git operation answer is not JSON: " + err.Error()}
+	}
+	return res, nil
 }
 
 // Error is a probe that did not answer.

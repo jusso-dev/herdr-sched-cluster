@@ -50,6 +50,13 @@ type WorkerEntry struct {
 	Arch     string `json:"arch,omitempty"`
 	MemoryMB int64  `json:"memory_mb,omitempty"`
 	Cores    int    `json:"cores,omitempty"`
+	// Policy thresholds for this worker.
+	MaxCPUUtilPct    float64 `json:"max_cpu_utilisation_percent,omitempty"`
+	MemoryReservePct float64 `json:"memory_reserve_percent,omitempty"`
+	MaxSwapPressure  string  `json:"max_swap_pressure,omitempty"`
+	// PathMap rewrites repository paths for this worker by prefix, for a
+	// machine that keeps its checkouts somewhere else.
+	PathMap map[string]string `json:"path_map,omitempty"`
 }
 
 // Build reads the cluster settings out of a loaded config.
@@ -161,6 +168,66 @@ func Build(c *config.Config) (Settings, error) {
 	if n, ok := i("cluster_max_agents"); ok {
 		d.MaxAgents = int(n)
 	}
+	if n, ok := f("cluster_max_cpu_utilisation_percent"); ok {
+		d.MaxCPUUtilPct = n
+	}
+	if n, ok := f("cluster_memory_reserve_percent"); ok {
+		d.MemoryReservePct = n
+	}
+	if v, ok := kv["cluster_max_swap_pressure"]; ok {
+		d.MaxSwapPressure = v
+	}
+	if n, ok := i("cluster_history_window"); ok {
+		cc.HistoryWindow = int(n)
+	}
+	if n, ok := f("cluster_history_percentile"); ok {
+		cc.HistoryPercentile = n
+	}
+	if n, ok := i("cluster_max_agents_per_repo"); ok {
+		cc.MaxPerRepo = int(n)
+	}
+	if n, ok := i("cluster_max_queue_size"); ok {
+		cc.MaxQueueSize = int(n)
+	}
+	if v, ok := kv["cluster_worktree_retention"]; ok {
+		cc.WorktreeRetention = v
+	}
+	if n, ok := i("cluster_worktree_max_age_hours"); ok {
+		if n < 1 {
+			return s, fmt.Errorf("cluster_worktree_max_age_hours must be at least 1")
+		}
+		cc.WorktreeMaxAge = time.Duration(n) * time.Hour
+	}
+	if v, ok := kv["cluster_pressure_action"]; ok {
+		cc.PressureAction = v
+	}
+	if n, ok := i("cluster_machine_status_seconds"); ok {
+		if n < 0 {
+			return s, fmt.Errorf("cluster_machine_status_seconds cannot be negative (0 turns it off)")
+		}
+		cc.MachineStatusEvery = time.Duration(n) * time.Second
+	}
+	for k, into := range map[string]*time.Duration{
+		"cluster_lost_after_seconds":     &cc.LostAfter,
+		"cluster_pressure_grace_seconds": &cc.PressureGrace,
+	} {
+		if err := secs(k, into, 1); err != nil {
+			return s, err
+		}
+	}
+	for k, into := range map[string]*bool{
+		"cluster_queue_enabled":         &cc.QueueEnabled,
+		"cluster_worktree_remove_dirty": &cc.WorktreeRemoveDirty,
+		"cluster_delete_branches":       &cc.DeleteBranches,
+		"cluster_retry_lost":            &cc.RetryLost,
+		"cluster_verify_identity":       &cc.VerifyIdentity,
+		"cluster_owner_checks":          &cc.OwnerChecks,
+		"cluster_explanations":          &cc.Explanations,
+	} {
+		if v, ok := kv[k]; ok {
+			*into, _ = strconv.ParseBool(v)
+		}
+	}
 	workers, err := LoadWorkers(s.WorkersFile)
 	if err != nil {
 		return s, err
@@ -193,7 +260,9 @@ func LoadWorkers(path string) (map[string]coord.WorkerConfig, error) {
 			Static:  resource.StaticSpec{OS: e.OS, Arch: e.Arch, MemoryMB: e.MemoryMB, Cores: e.Cores, Agents: e.Agents},
 			Settings: placement.Settings{MaxAgents: e.MaxAgents, MinFreeMemoryMB: e.MinFreeMemoryMB, MaxCPUCommit: e.MaxCPUCommit,
 				MaxLoadPerCore: e.MaxLoadPerCore, MinFreeDiskGB: e.MinFreeDiskGB, MinBatteryPct: e.MinBatteryPct,
-				Weight: e.Weight, Labels: e.Labels, Agents: e.Agents},
+				Weight: e.Weight, Labels: e.Labels, Agents: e.Agents, MaxCPUUtilPct: e.MaxCPUUtilPct,
+				MemoryReservePct: e.MemoryReservePct, MaxSwapPressure: e.MaxSwapPressure},
+			PathMap: e.PathMap,
 		}
 	}
 	return out, nil

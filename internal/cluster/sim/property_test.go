@@ -12,8 +12,8 @@ import (
 
 // Property: across random submissions, ticks, injected Herdr failures,
 // ambiguous agent starts (the start happened but the answer was lost),
-// unreachable workers, pressure changes, agents exiting, clock jumps and
-// coordinator restarts, no agent is ever started twice, and every live
+// unreachable workers, pressure changes, agents exiting, Herdr restarts,
+// sessions closed from outside, clock jumps and coordinator restarts, no agent is ever started twice, and every live
 // agent belongs to exactly one active job on the machine it runs on.
 func TestPropertyNoDoubleDispatch(t *testing.T) {
 	seeds := 30
@@ -26,7 +26,7 @@ func TestPropertyNoDoubleDispatch(t *testing.T) {
 		machines := []string{"mbp", "mini"}
 		for step := 0; step < 120; step++ {
 			m := machines[rnd.Intn(2)]
-			switch op := rnd.Intn(14); {
+			switch op := rnd.Intn(16); {
 			case op < 3:
 				r.submit(int64(1024 * (1 + rnd.Intn(8))))
 			case op < 6:
@@ -82,6 +82,19 @@ func TestPropertyNoDoubleDispatch(t *testing.T) {
 				})
 				if name != "" {
 					r.cl.SetRSS(m, name, int64(256+rnd.Intn(12000)))
+				}
+			case op == 14:
+				r.cl.RestartHerdr(m)
+			case op == 15:
+				var name string
+				r.cl.With(func() {
+					for n := range r.cl.Machines[m].Agents {
+						name = n
+						break
+					}
+				})
+				if name != "" {
+					r.cl.CloseSession(m, name)
 				}
 			}
 			r.check()

@@ -161,8 +161,8 @@ None of them measures host resources or places work across machines.
 ## 7. Note on the brief itself
 
 The copy of the build brief this work started from had its middle sections
-(roughly 3.3 to 13) cut off in transit. Sections 1 to 3.2 and 13 to 17 were
-read in full. The design covers the topics those missing sections almost
-certainly ask for (scheduling policies, queueing, isolation, security,
-configuration, observability, CLI), and the checklist marks anything inferred
-so it can be checked against the full text.
+(roughly 3.3 to 13) cut off in transit. For v0.5.0 Justin supplied the full
+text of sections 3.3 to 12, kept in
+[BRIEF-sections-3.3-12.md](BRIEF-sections-3.3-12.md), and
+[IMPLEMENTATION-CHECKLIST.md](IMPLEMENTATION-CHECKLIST.md) now audits every
+bullet of it with a status and evidence.

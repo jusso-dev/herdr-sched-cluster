@@ -33,7 +33,9 @@ you can parse.
    age). Submit the most important work first.
 5. **Follow up.** `cluster_jobs` shows where each agent runs (worker and Herdr
    pane). `cluster_queue` lists waiting jobs in order with why each waits.
-   `cluster_explain <job>` gives the full reasoning for one job.
+   `cluster_explain <job>` gives the full reasoning for one job, with its
+   next action. `cluster_attach <job>` gives the Herdr commands to open the
+   agent, and `cluster_estimates` shows what each kind of agent has used.
 
 ## Rules
 
@@ -50,8 +52,14 @@ you can parse.
 - Two agents in the same repository on one machine get separate git worktrees
   automatically (`isolation` = `auto`). Do not set `isolation` to `none` for
   parallel edits.
+- Use `depends_on` for work that must wait for other jobs, and `clone_url`
+  when the repository may not exist on every machine. Only set `restartable`
+  when starting the job again from scratch is harmless, and `disposable` only
+  when the user says the job may be closed under memory pressure.
 - Ask the user before `cluster_drain`, `cluster_undrain`, `cluster_cancel`,
-  `cluster_detach` or `stop`. The scheduler never kills a running agent.
+  `cluster_detach`, `cluster_reregister` or `stop`. The scheduler never kills
+  a running agent unless the user marked it disposable and turned on
+  `terminate-disposable`.
 - If a tool answers `DENIED` with a `parked_id`, a policy gate wants the user to
   decide. Tell them; do not resolve it yourself.
 
@@ -62,6 +70,12 @@ you can parse.
   for an agent, OS, label or machine nobody has. Fix the request.
 - A warning such as "claude was not found on the PATH the probe saw" does not
   stop placement, but check that the agent is installed on that machine.
+- A job that is `lost` disappeared without finishing: Herdr restarted, its
+  session vanished, or its worker stayed unreachable. `cluster_explain` says
+  which. Ask the user before resubmitting it.
+- A worker that is `herdr_unreachable` or `incompatible` takes no work either;
+  `incompatible` means it answered as a different machine, and only the user
+  should approve `cluster_reregister`.
 - A worker that is `unreachable`, `auth_required` or in `backoff` takes no work.
   `cluster_workers` with `refresh` shows the last error. Tell the user rather
   than retrying in a loop.

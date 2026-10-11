@@ -70,6 +70,17 @@ type Placement struct {
 	WorkspaceID string
 	PaneID      string
 	Path        string
+	Branch      string
+}
+
+// Workspace is the part of Herdr's WorkspaceInfo the scheduler reads.
+type Workspace struct {
+	ID       string `json:"workspace_id"`
+	Label    string `json:"label"`
+	Worktree *struct {
+		CheckoutPath string `json:"checkout_path"`
+		IsLinked     bool   `json:"is_linked_worktree"`
+	} `json:"worktree,omitempty"`
 }
 
 // StartRequest is one `agent start`.
@@ -89,6 +100,12 @@ type Herdr interface {
 	WorkspaceCreate(ctx context.Context, machine, cwd, label string) (Placement, error)
 	WorktreeCreate(ctx context.Context, machine, cwd, branch, label string) (Placement, error)
 	WorkspaceClose(ctx context.Context, machine, workspace string) error
+	// WorkspaceList lists a machine's workspaces.
+	WorkspaceList(ctx context.Context, machine string) ([]Workspace, error)
+	// WorktreeRemove removes a worktree workspace's checkout. Without force
+	// Herdr refuses a checkout with modified or untracked files, with the
+	// code dirty_worktree_requires_force.
+	WorktreeRemove(ctx context.Context, machine, workspace string, force bool) error
 	AgentStart(ctx context.Context, machine string, req StartRequest) error
 	AgentPrompt(ctx context.Context, machine, target, text string) error
 	Agents(ctx context.Context, machine string) ([]Agent, error)
@@ -264,7 +281,8 @@ type created struct {
 		PaneID string `json:"pane_id"`
 	} `json:"root_pane"`
 	Worktree struct {
-		Path string `json:"path"`
+		Path   string `json:"path"`
+		Branch string `json:"branch"`
 	} `json:"worktree"`
 }
 
@@ -272,7 +290,7 @@ func (r created) placement(verb string) (Placement, error) {
 	if r.Workspace.WorkspaceID == "" || r.RootPane.PaneID == "" {
 		return Placement{}, fmt.Errorf("herdr %s: no workspace or pane id in the response", verb)
 	}
-	return Placement{WorkspaceID: r.Workspace.WorkspaceID, PaneID: r.RootPane.PaneID, Path: r.Worktree.Path}, nil
+	return Placement{WorkspaceID: r.Workspace.WorkspaceID, PaneID: r.RootPane.PaneID, Path: r.Worktree.Path, Branch: r.Worktree.Branch}, nil
 }
 
 // WorkspaceCreate opens a workspace at cwd without taking focus.
@@ -301,6 +319,31 @@ func (c *CLI) WorkspaceClose(ctx context.Context, machine, workspace string) err
 		return err
 	}
 	return c.result(ctx, 0, nil, machine, "workspace", "close", workspace)
+}
+
+// WorkspaceList lists the workspaces on a machine.
+func (c *CLI) WorkspaceList(ctx context.Context, machine string) ([]Workspace, error) {
+	var r struct {
+		Workspaces []Workspace `json:"workspaces"`
+	}
+	if err := c.result(ctx, 0, &r, machine, "workspace", "list"); err != nil {
+		return nil, err
+	}
+	return r.Workspaces, nil
+}
+
+// WorktreeRemove removes the checkout behind a worktree workspace. force is
+// only ever passed when the operator's retention policy says dirty
+// worktrees may be removed.
+func (c *CLI) WorktreeRemove(ctx context.Context, machine, workspace string, force bool) error {
+	if err := checkID("workspace", workspace); err != nil {
+		return err
+	}
+	args := []string{"worktree", "remove", "--workspace", workspace}
+	if force {
+		args = append(args, "--force")
+	}
+	return c.result(ctx, 2*time.Minute, nil, machine, args...)
 }
 
 // AgentStart starts a named agent in a pane. A "timeout" refusal means the
@@ -355,7 +398,7 @@ func (c *CLI) ProcessInfo(ctx context.Context, machine, pane string) (ProcessInf
 	var r struct {
 		Info ProcessInfo `json:"process_info"`
 	}
-	full, err := argv(machine, "pane", "process-info", pane)
+	full, err := argv(machine, "pane", "process-info", "--pane", pane)
 	if err != nil {
 		return ProcessInfo{}, err
 	}

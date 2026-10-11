@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/coord"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/gitop"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/herdrx"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/resource"
 )
@@ -58,11 +60,34 @@ type Machine struct {
 	ListFails       int            // next agent list calls fail
 	LostReplies     int            // starts that succeed but report an error; the agent list still works
 	MissingPaths    map[string]bool
+	// EmptyRepos are repositories with no commits: a worktree of one fails
+	// the way Git does.
+	EmptyRepos map[string]bool
+	// HerdrStatus overrides what `herdr machine status` says ("" is
+	// reachable, or error when Unreachable).
+	HerdrStatus string
+	// UtilPct is CPU use from things other than scheduled agents.
+	UtilPct float64
+	// ResumeOnRestart makes every pane show a foreground process after a
+	// Herdr restart, as an agent resuming its own session would.
+	ResumeOnRestart bool
 
 	Agents     map[string]*Agent
 	Workspaces map[string]string // id -> cwd
 	Worktrees  int
 	nextWS     int
+	// Meta is what else Herdr knows about each workspace.
+	Meta map[string]*WS
+}
+
+// WS is a simulated workspace: its label, whether it is a worktree, whether
+// that worktree has uncommitted changes, and its pane's shell process.
+type WS struct {
+	Label    string
+	Branch   string
+	Worktree bool
+	Dirty    bool
+	Shell    int
 }
 
 // Cluster is the whole simulated cluster.
@@ -77,6 +102,14 @@ type Cluster struct {
 	// Prompts counts prompts per agent name.
 	Prompts map[string]int
 	Calls   map[string]int
+	// GitOps records each Git operation the coordinator ran, as
+	// "machine op branch-or-url".
+	GitLog []string
+	// AllowKill lets closing a workspace end the agent in it, as Herdr
+	// does. Only the pressure policy may do that; every other test keeps it
+	// off so an accidental close is caught.
+	AllowKill bool
+	Killed    []string
 }
 
 // New makes an empty cluster.
@@ -91,7 +124,8 @@ func (c *Cluster) Add(id string, totalMB int64, cores int) *Machine {
 	defer c.mu.Unlock()
 	m := &Machine{ID: id, Label: id, Enabled: true, TotalMB: totalMB, BaseUsedMB: 4096, Cores: cores,
 		Pressure: resource.PressureNormal, OS: "darwin", Arch: "arm64", Fail: map[string]int{},
-		MissingPaths: map[string]bool{}, Agents: map[string]*Agent{}, Workspaces: map[string]string{}}
+		MissingPaths: map[string]bool{}, EmptyRepos: map[string]bool{}, Agents: map[string]*Agent{}, Workspaces: map[string]string{},
+		Meta: map[string]*WS{}}
 	c.Machines[id] = m
 	return m
 }
@@ -158,12 +192,15 @@ func (f fakeHerdr) MachineStatus(ctx context.Context) ([]herdrx.MachineStatus, e
 		if f.c.Machines[m.ID].Unreachable {
 			st = "error"
 		}
+		if o := f.c.Machines[m.ID].HerdrStatus; o != "" {
+			st = o
+		}
 		out = append(out, herdrx.MachineStatus{ID: m.ID, Label: m.Label, Status: st})
 	}
 	return out, nil
 }
 
-func (f fakeHerdr) open(machine, op, cwd string) (herdrx.Placement, error) {
+func (f fakeHerdr) open(machine, op, cwd, branch, label string) (herdrx.Placement, error) {
 	f.c.mu.Lock()
 	defer f.c.mu.Unlock()
 	m, err := f.c.call(machine, op)
@@ -173,21 +210,74 @@ func (f fakeHerdr) open(machine, op, cwd string) (herdrx.Placement, error) {
 	if m.MissingPaths[cwd] {
 		return herdrx.Placement{}, fmt.Errorf("herdr %s: %s does not exist", op, cwd)
 	}
+	if op == "worktree" && m.EmptyRepos[cwd] {
+		return herdrx.Placement{}, &herdrx.Error{Code: "worktree_create_failed", Message: "git worktree add failed: fatal: invalid reference: HEAD"}
+	}
 	m.nextWS++
 	ws := fmt.Sprintf("w%d", m.nextWS)
 	m.Workspaces[ws] = cwd
+	f.c.nextPID++
+	m.Meta[ws] = &WS{Label: label, Shell: f.c.nextPID}
 	if op == "worktree" {
 		m.Worktrees++
+		m.Meta[ws].Worktree, m.Meta[ws].Branch = true, branch
 	}
-	return herdrx.Placement{WorkspaceID: ws, PaneID: ws + ":p1"}, nil
+	return herdrx.Placement{WorkspaceID: ws, PaneID: ws + ":p1", Branch: branch}, nil
 }
 
 func (f fakeHerdr) WorkspaceCreate(ctx context.Context, machine, cwd, label string) (herdrx.Placement, error) {
-	return f.open(machine, "workspace", cwd)
+	return f.open(machine, "workspace", cwd, "", label)
 }
 
 func (f fakeHerdr) WorktreeCreate(ctx context.Context, machine, cwd, branch, label string) (herdrx.Placement, error) {
-	return f.open(machine, "worktree", cwd)
+	return f.open(machine, "worktree", cwd, branch, label)
+}
+
+func (f fakeHerdr) WorkspaceList(ctx context.Context, machine string) ([]herdrx.Workspace, error) {
+	f.c.mu.Lock()
+	defer f.c.mu.Unlock()
+	m, err := f.c.call(machine, "workspace-list")
+	if err != nil {
+		return nil, err
+	}
+	var out []herdrx.Workspace
+	for id := range m.Workspaces {
+		w := herdrx.Workspace{ID: id}
+		if meta := m.Meta[id]; meta != nil {
+			w.Label = meta.Label
+		}
+		out = append(out, w)
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
+	return out, nil
+}
+
+func (f fakeHerdr) WorktreeRemove(ctx context.Context, machine, ws string, force bool) error {
+	f.c.mu.Lock()
+	defer f.c.mu.Unlock()
+	m, err := f.c.call(machine, "worktree-remove")
+	if err != nil {
+		return err
+	}
+	meta, ok := m.Meta[ws]
+	if _, open := m.Workspaces[ws]; !open || !ok {
+		return &herdrx.Error{Code: "workspace_not_found", Message: ws}
+	}
+	if !meta.Worktree {
+		return &herdrx.Error{Code: "not_a_worktree", Message: ws}
+	}
+	for _, a := range m.Agents {
+		if a.Workspace == ws {
+			return fmt.Errorf("refusing to remove a worktree with a live agent (test invariant)")
+		}
+	}
+	if meta.Dirty && !force {
+		return &herdrx.Error{Code: "dirty_worktree_requires_force", Message: "worktree has modified or untracked files"}
+	}
+	delete(m.Workspaces, ws)
+	delete(m.Meta, ws)
+	m.Worktrees--
+	return nil
 }
 
 func (f fakeHerdr) WorkspaceClose(ctx context.Context, machine, ws string) error {
@@ -197,12 +287,17 @@ func (f fakeHerdr) WorkspaceClose(ctx context.Context, machine, ws string) error
 	if err != nil {
 		return err
 	}
-	for _, a := range m.Agents {
+	for name, a := range m.Agents {
 		if a.Workspace == ws {
-			return fmt.Errorf("refusing to close a workspace with a live agent (test invariant)")
+			if !f.c.AllowKill {
+				return fmt.Errorf("refusing to close a workspace with a live agent (test invariant)")
+			}
+			delete(m.Agents, name)
+			f.c.Killed = append(f.c.Killed, name)
 		}
 	}
 	delete(m.Workspaces, ws)
+	delete(m.Meta, ws)
 	return nil
 }
 
@@ -284,12 +379,35 @@ func (f fakeHerdr) ProcessInfo(ctx context.Context, machine, pane string) (herdr
 	if err != nil {
 		return herdrx.ProcessInfo{}, err
 	}
+	ws := strings.TrimSuffix(pane, ":p1")
+	meta, ok := m.Meta[ws]
+	if _, open := m.Workspaces[ws]; !open || !ok {
+		return herdrx.ProcessInfo{}, &herdrx.Error{Code: "pane_not_found", Message: pane}
+	}
+	pi := herdrx.ProcessInfo{PaneID: pane, ShellPID: meta.Shell}
+	busy := false
+	for _, a := range m.Agents {
+		busy = busy || a.Pane == pane
+	}
+	if !busy || m.ResumeOnRestart {
+		// Herdr lists an idle pane's shell as its foreground process.
+		pi.Foreground = append(pi.Foreground, struct {
+			PID int `json:"pid"`
+		}{meta.Shell})
+	}
+	if m.ResumeOnRestart {
+		pi.Foreground = append(pi.Foreground, struct {
+			PID int `json:"pid"`
+		}{meta.Shell + 100000})
+	}
 	for _, a := range m.Agents {
 		if a.Pane == pane {
-			return herdrx.ProcessInfo{PaneID: pane, ShellPID: a.PID}, nil
+			pi.Foreground = append(pi.Foreground, struct {
+				PID int `json:"pid"`
+			}{a.PID})
 		}
 	}
-	return herdrx.ProcessInfo{}, &herdrx.Error{Code: "pane_not_found", Message: pane}
+	return pi, nil
 }
 
 // Prober returns the cluster's prober.
@@ -312,8 +430,13 @@ func (p fakeProber) Probe(ctx context.Context, t coord.Target, req resource.Requ
 		return resource.Snapshot{}, 0, errors.New("probe failed")
 	}
 	used := m.BaseUsedMB
+	util := m.UtilPct
 	for _, a := range m.Agents {
 		used += a.RSSMB
+		util += 50 / float64(m.Cores) // each agent uses half a core
+	}
+	if util > 100 {
+		util = 100
 	}
 	avail := m.TotalMB - used
 	if avail < 0 {
@@ -322,7 +445,7 @@ func (p fakeProber) Probe(ctx context.Context, t coord.Target, req resource.Requ
 	s := resource.Snapshot{Schema: resource.SchemaVersion, Backend: resource.BackendDarwin, Host: m.ID, OS: m.OS, Arch: m.Arch,
 		CollectedAt: p.c.Clock.Now(), Home: "/Users/sim", Thermal: resource.ThermalNominal,
 		Memory: resource.Memory{TotalMB: m.TotalMB, AvailableMB: avail, Pressure: m.Pressure, PressureSource: "sim"},
-		CPU:    resource.CPU{LogicalCores: m.Cores, PhysicalCores: m.Cores, Load5: m.Load5},
+		CPU:    resource.CPU{LogicalCores: m.Cores, PhysicalCores: m.Cores, Load5: m.Load5, UtilPct: util, UtilSource: "sim"},
 		Disk:   resource.Disk{Path: "/Users/sim", TotalGB: 1000, FreeGB: 500},
 		Power:  resource.Power{Source: resource.PowerAC, BatteryPct: -1},
 		Agents: resource.AgentKinds()}
@@ -333,7 +456,20 @@ func (p fakeProber) Probe(ctx context.Context, t coord.Target, req resource.Requ
 		}
 	}
 	for _, pid := range req.PIDs {
+		// A pane's shell is measured with its descendants, so the agent
+		// running in it is folded in.
 		ps := resource.ProcSample{PID: pid}
+		for id, meta := range m.Meta {
+			if meta.Shell != pid {
+				continue
+			}
+			ps.Found, ps.RSSMB, ps.Procs = true, 5, 1
+			for _, a := range m.Agents {
+				if a.Workspace == id {
+					ps.RSSMB, ps.CPUPct, ps.Procs = a.RSSMB, 50, 3
+				}
+			}
+		}
 		for _, a := range m.Agents {
 			if a.PID == pid {
 				ps.Found, ps.RSSMB, ps.CPUPct, ps.Procs = true, a.RSSMB, 50, 3
@@ -346,6 +482,68 @@ func (p fakeProber) Probe(ctx context.Context, t coord.Target, req resource.Requ
 		lat = 8
 	}
 	return s, lat, nil
+}
+
+// RestartHerdr restarts a machine's Herdr server: every agent ends, and each
+// workspace comes back with a new shell in its pane.
+func (c *Cluster) RestartHerdr(machine string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.Machines[machine]
+	m.Agents = map[string]*Agent{}
+	for _, meta := range m.Meta {
+		c.nextPID++
+		meta.Shell = c.nextPID
+	}
+}
+
+// CloseSession closes the workspace an agent runs in, from outside the
+// scheduler, as a person closing it in Herdr would.
+func (c *Cluster) CloseSession(machine, name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.Machines[machine]
+	a, ok := m.Agents[name]
+	if !ok {
+		return
+	}
+	delete(m.Agents, name)
+	delete(m.Workspaces, a.Workspace)
+	delete(m.Meta, a.Workspace)
+}
+
+// Dirty marks the worktree an agent ran in as having uncommitted changes.
+func (c *Cluster) Dirty(machine, workspace string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if meta := c.Machines[machine].Meta[workspace]; meta != nil {
+		meta.Dirty = true
+	}
+}
+
+// GitOps returns the cluster's Git operations runner.
+func (c *Cluster) GitOps() coord.GitOps { return fakeGit{c} }
+
+type fakeGit struct{ c *Cluster }
+
+func (g fakeGit) Run(ctx context.Context, t coord.Target, r gitop.Request) (gitop.Result, error) {
+	g.c.mu.Lock()
+	defer g.c.mu.Unlock()
+	m, err := g.c.machine(t.ID)
+	if err != nil {
+		return gitop.Result{}, err
+	}
+	if err := r.Validate(); err != nil {
+		return gitop.Result{OK: false, Refused: true, Message: err.Error()}, nil
+	}
+	switch r.Op {
+	case gitop.OpClone:
+		g.c.GitLog = append(g.c.GitLog, t.ID+" clone "+r.URL)
+		delete(m.MissingPaths, r.Path)
+	case gitop.OpBranchDelete:
+		g.c.GitLog = append(g.c.GitLog, t.ID+" branch-delete "+r.Branch)
+	}
+	return gitop.Result{OK: true}, nil
 }
 
 // Exit ends an agent, as if it finished its work.

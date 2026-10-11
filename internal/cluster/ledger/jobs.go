@@ -55,6 +55,39 @@ type Job struct {
 	// ReservedMB is the live reservation, which can grow past MemoryMB when
 	// the agent overruns its estimate.
 	ReservedMB int64 `json:"reserved_mb,omitempty"`
+	// CPUSource says where the CPU figure came from: requested, default or
+	// history.
+	CPUSource string `json:"cpu_estimate_source,omitempty"`
+	// Restartable says the submitter declared the job safe to run again
+	// from the start, which is what lets a lost job be retried.
+	Restartable bool `json:"restartable,omitempty"`
+	// Disposable says the job may be terminated under memory pressure when
+	// cluster_pressure_action allows it. Nothing else is ever terminated.
+	Disposable bool     `json:"disposable,omitempty"`
+	DependsOn  []string `json:"depends_on,omitempty"`
+	// StartAttemptedAt and PromptSentAt are written just before the agent
+	// start and the first prompt, so a coordinator that dies mid-dispatch
+	// knows afterwards how far it got.
+	StartAttemptedAt time.Time `json:"start_attempted_at,omitempty"`
+	PromptSentAt     time.Time `json:"prompt_sent_at,omitempty"`
+	// ShellPID is the pane's shell as last seen. A different shell in the
+	// same pane means Herdr on the worker restarted underneath the agent.
+	ShellPID int     `json:"shell_pid,omitempty"`
+	PeakCPU  float64 `json:"peak_cpu_pct,omitempty"`
+	// EndReason is a short machine-readable reason for an end state, such as
+	// agent_exited, herdr_restarted, session_vanished or worker_unreachable.
+	EndReason string `json:"end_reason,omitempty"`
+	// Cleanup is what happened to the job's worktree: pending, removed or
+	// kept, with CleanupNote saying why.
+	Cleanup        string    `json:"workspace_cleanup,omitempty"`
+	CleanupNote    string    `json:"workspace_cleanup_note,omitempty"`
+	Branch         string    `json:"branch,omitempty"`
+	NoWorktree     bool      `json:"no_worktree,omitempty"`
+	CloneURL       string    `json:"clone_url,omitempty"`
+	DisconnectedAt time.Time `json:"disconnected_at,omitempty"`
+	// WorkerPath is the repository path on the worker, after per-worker
+	// path mapping and ~ expansion.
+	WorkerPath string `json:"worker_path,omitempty"`
 }
 
 // NewJob is what Submit stores.
@@ -70,27 +103,47 @@ type NewJob struct {
 	OS, Arch, Isolation string
 	SubmittedBy         string
 	MaxAttempts         int
+	CPUSource           string
+	Restartable         bool
+	Disposable          bool
+	DependsOn           []string
+	CloneURL            string
 }
 
 const jobCols = `j.id,j.seq,j.state,j.kind,j.repo,j.prompt,j.prompt_sha,j.agent_args,j.memory_mb,j.cpu,j.estimate_source,
 j.priority,j.policy,j.machine,j.labels,j.os,j.arch,j.isolation,j.submitted_by,j.submitted_at,j.updated_at,j.attempts,
 j.max_attempts,j.worker,j.agent_name,j.workspace_id,j.pane_id,j.worktree,j.token,j.started_at,j.finished_at,
 j.disconnected,j.observed_rss_mb,j.observed_cpu,j.peak_rss_mb,j.last_error,
-COALESCE((SELECT memory_mb FROM reservations r WHERE r.job_id=j.id AND r.released_at IS NULL),0)`
+COALESCE((SELECT memory_mb FROM reservations r WHERE r.job_id=j.id AND r.released_at IS NULL),0),
+j.cpu_source,j.restartable,j.disposable,j.depends_on,j.start_intent,j.prompt_intent,j.shell_pid,j.peak_cpu,j.end_reason,
+j.cleanup,j.cleanup_note,j.branch,j.no_worktree,j.clone_url,j.disconnected_at,j.worker_path`
 
 type scanner interface{ Scan(...any) error }
 
 func scanJob(s scanner) (Job, error) {
 	var j Job
-	var args, labels string
-	var sub, upd, started, finished int64
-	var wt, disc int
+	var args, labels, deps string
+	var sub, upd, started, finished, startIntent, promptIntent, discAt int64
+	var wt, disc, restartable, disposable, noWT int
 	err := s.Scan(&j.ID, &j.Seq, &j.State, &j.Kind, &j.Repo, &j.Prompt, &j.PromptSHA, &args, &j.MemoryMB, &j.CPU,
 		&j.EstimateSource, &j.Priority, &j.Policy, &j.Machine, &labels, &j.OS, &j.Arch, &j.Isolation, &j.SubmittedBy,
 		&sub, &upd, &j.Attempts, &j.MaxAttempts, &j.Worker, &j.AgentName, &j.WorkspaceID, &j.PaneID, &wt, &j.Token,
-		&started, &finished, &disc, &j.ObservedRSSMB, &j.ObservedCPU, &j.PeakRSSMB, &j.LastError, &j.ReservedMB)
+		&started, &finished, &disc, &j.ObservedRSSMB, &j.ObservedCPU, &j.PeakRSSMB, &j.LastError, &j.ReservedMB,
+		&j.CPUSource, &restartable, &disposable, &deps, &startIntent, &promptIntent, &j.ShellPID, &j.PeakCPU, &j.EndReason,
+		&j.Cleanup, &j.CleanupNote, &j.Branch, &noWT, &j.CloneURL, &discAt, &j.WorkerPath)
 	if err != nil {
 		return j, err
+	}
+	_ = json.Unmarshal([]byte(deps), &j.DependsOn)
+	j.Restartable, j.Disposable, j.NoWorktree = restartable != 0, disposable != 0, noWT != 0
+	if startIntent > 0 {
+		j.StartAttemptedAt = time.UnixMilli(startIntent).UTC()
+	}
+	if promptIntent > 0 {
+		j.PromptSentAt = time.UnixMilli(promptIntent).UTC()
+	}
+	if discAt > 0 {
+		j.DisconnectedAt = time.UnixMilli(discAt).UTC()
 	}
 	_ = json.Unmarshal([]byte(args), &j.AgentArgs)
 	_ = json.Unmarshal([]byte(labels), &j.Labels)
@@ -124,6 +177,7 @@ func (l *Ledger) Submit(ctx context.Context, n NewJob) (Job, error) {
 	}
 	args, _ := json.Marshal(nonNil(n.AgentArgs))
 	labels, _ := json.Marshal(nonNil(n.Labels))
+	deps, _ := json.Marshal(nonNil(n.DependsOn))
 	sum := sha256.Sum256([]byte(n.Prompt))
 	sha := ""
 	if n.Prompt != "" {
@@ -137,17 +191,30 @@ func (l *Ledger) Submit(ctx context.Context, n NewJob) (Job, error) {
 		}
 		id = fmt.Sprintf("j%d", seq)
 		now := l.ms()
+		for _, d := range n.DependsOn {
+			var st string
+			if err := tx.QueryRowContext(ctx, `SELECT state FROM jobs WHERE id=?`, d).Scan(&st); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("depends on %s, which is not a cluster job", d)
+				}
+				return err
+			}
+		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,seq,state,kind,repo,prompt,prompt_sha,agent_args,memory_mb,cpu,
-			estimate_source,priority,policy,machine,labels,os,arch,isolation,submitted_by,submitted_at,updated_at,max_attempts,agent_name)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			estimate_source,priority,policy,machine,labels,os,arch,isolation,submitted_by,submitted_at,updated_at,max_attempts,agent_name,
+			cpu_source,restartable,disposable,depends_on,clone_url)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			id, seq, Queued, n.Kind, n.Repo, n.Prompt, sha, string(args), n.MemoryMB, n.CPU, n.EstimateSource, n.Priority,
-			n.Policy, n.Machine, string(labels), n.OS, n.Arch, n.Isolation, n.SubmittedBy, now, now, n.MaxAttempts, AgentName(id))
+			n.Policy, n.Machine, string(labels), n.OS, n.Arch, n.Isolation, n.SubmittedBy, now, now, n.MaxAttempts, AgentName(id),
+			n.CPUSource, boolInt(n.Restartable), boolInt(n.Disposable), string(deps), n.CloneURL)
 		if err != nil {
 			return err
 		}
 		return event(ctx, tx, now, "cluster.job.submitted", id, "", map[string]any{
 			"kind": n.Kind, "repo": n.Repo, "memory_mb": n.MemoryMB, "cpu": n.CPU, "estimate": n.EstimateSource,
-			"priority": n.Priority, "prompt_chars": len([]rune(n.Prompt)), "prompt_sha256": sha,
+			"cpu_estimate": n.CPUSource, "priority": n.Priority, "prompt_chars": len([]rune(n.Prompt)), "prompt_sha256": sha,
+			"depends_on": nonNil(n.DependsOn), "restartable": n.Restartable, "disposable": n.Disposable,
+			"submitted_by": n.SubmittedBy,
 		})
 	})
 	if err != nil {
@@ -205,8 +272,16 @@ type Load struct {
 	PendingMemoryMB int64
 	ReservedMB      int64
 	CommittedCPU    float64
-	ActiveAgents    int
-	RunningRepos    map[string]int
+	// PendingCPU is committed CPU the worker's utilisation reading does
+	// not yet show: reservations not yet running, and the part of each
+	// estimate the agent is not observed using. For a static worker it is
+	// all of CommittedCPU.
+	PendingCPU   float64
+	ActiveAgents int
+	RunningRepos map[string]int
+	// ClusterRepos counts active jobs per repository across every worker,
+	// for the per-repository concurrency limit.
+	ClusterRepos map[string]int
 }
 
 // loadTx sums a worker's live reservations. For a measured worker, memory an
@@ -216,26 +291,35 @@ type Load struct {
 func loadTx(ctx context.Context, q interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, worker string, static bool) (Load, error) {
-	rows, err := q.QueryContext(ctx, `SELECT r.memory_mb, r.cpu, j.observed_rss_mb, j.repo FROM reservations r
-		JOIN jobs j ON j.id=r.job_id WHERE r.worker=? AND r.released_at IS NULL`, worker)
+	rows, err := q.QueryContext(ctx, `SELECT r.memory_mb, r.cpu, j.observed_rss_mb, j.observed_cpu, j.repo, r.worker FROM reservations r
+		JOIN jobs j ON j.id=r.job_id WHERE r.released_at IS NULL`)
 	if err != nil {
 		return Load{}, err
 	}
 	defer rows.Close()
-	ld := Load{RunningRepos: map[string]int{}}
+	ld := Load{RunningRepos: map[string]int{}, ClusterRepos: map[string]int{}}
 	for rows.Next() {
 		var mem, observed int64
-		var cpu float64
-		var repo string
-		if err := rows.Scan(&mem, &cpu, &observed, &repo); err != nil {
+		var cpu, observedCPU float64
+		var repo, w string
+		if err := rows.Scan(&mem, &cpu, &observed, &observedCPU, &repo, &w); err != nil {
 			return Load{}, err
+		}
+		if repo != "" {
+			ld.ClusterRepos[repo]++
+		}
+		if w != worker {
+			continue
 		}
 		ld.ReservedMB += mem
 		pending := mem
+		pendingCPU := cpu
 		if !static {
 			pending = mem - min64(observed, mem)
+			pendingCPU = cpu - math.Min(observedCPU/100, cpu)
 		}
 		ld.PendingMemoryMB += pending
+		ld.PendingCPU += pendingCPU
 		ld.CommittedCPU += cpu
 		ld.ActiveAgents++
 		if repo != "" {
@@ -283,7 +367,8 @@ func (l *Ledger) Reserve(ctx context.Context, jobID, worker string, static bool,
 			return err
 		}
 		res, err := tx.ExecContext(ctx, `UPDATE jobs SET state=?, worker=?, token=?, updated_at=?, attempts=attempts+1,
-			disconnected=0, observed_rss_mb=0, observed_cpu=0 WHERE id=? AND state=?`,
+			disconnected=0, disconnected_at=0, observed_rss_mb=0, observed_cpu=0, start_intent=0, prompt_intent=0,
+			shell_pid=0, end_reason='', worker_path='', cleanup='', cleanup_note='', branch='' WHERE id=? AND state=?`,
 			Reserved, worker, token, now, jobID, Queued)
 		if err != nil {
 			return err
@@ -433,7 +518,8 @@ func (l *Ledger) Abandon(ctx context.Context, jobID, token, reason string) error
 		if state != Reserved && state != Dispatching {
 			return ErrConflict
 		}
-		if err := l.move(ctx, tx, jobID, token, state, Failed, `, last_error=?, finished_at=?`, truncate(reason, 500), l.ms()); err != nil {
+		if err := l.move(ctx, tx, jobID, token, state, Failed, `, last_error=?, finished_at=?, end_reason='dispatch_interrupted',
+			cleanup=CASE WHEN worktree<>0 AND workspace_id<>'' THEN 'pending' ELSE '' END`, truncate(reason, 500), l.ms()); err != nil {
 			return err
 		}
 		if err := l.release(ctx, tx, jobID); err != nil {
@@ -448,27 +534,42 @@ func (l *Ledger) Abandon(ctx context.Context, jobID, token, reason string) error
 // (detached). The reservation is released and what the agent used is
 // remembered for the next estimate.
 func (l *Ledger) Finish(ctx context.Context, jobID, to, reason string) error {
+	return l.End(ctx, jobID, to, "", reason)
+}
+
+// End is Finish with a machine-readable end reason (agent_exited,
+// herdr_restarted, session_vanished, worker_unreachable, detached, ...).
+func (l *Ledger) End(ctx context.Context, jobID, to, endReason, reason string) error {
 	if to != Finished && to != Lost && to != Detached {
 		return fmt.Errorf("ledger: %s is not an end state for a running job", to)
+	}
+	if endReason == "" {
+		endReason = map[string]string{Finished: "agent_exited", Lost: "session_vanished", Detached: "detached"}[to]
 	}
 	return l.tx(ctx, func(tx *sql.Tx) error {
 		var kind, repo string
 		var peak int64
-		if err := tx.QueryRowContext(ctx, `SELECT kind, repo, peak_rss_mb FROM jobs WHERE id=?`, jobID).Scan(&kind, &repo, &peak); err != nil {
+		var worktree int
+		if err := tx.QueryRowContext(ctx, `SELECT kind, repo, peak_rss_mb, worktree FROM jobs WHERE id=?`, jobID).Scan(&kind, &repo, &peak, &worktree); err != nil {
 			return err
 		}
-		if err := l.move(ctx, tx, jobID, "", Running, to, `, finished_at=?, last_error=?`, l.ms(), truncate(reason, 500)); err != nil {
+		cleanup := ""
+		if worktree != 0 && to != Detached {
+			cleanup = CleanupPending
+		}
+		if err := l.move(ctx, tx, jobID, "", Running, to, `, finished_at=?, last_error=?, end_reason=?, cleanup=?`,
+			l.ms(), truncate(reason, 500), endReason, cleanup); err != nil {
 			return err
 		}
 		if err := l.release(ctx, tx, jobID); err != nil {
 			return err
 		}
-		if peak > 0 {
-			if err := learn(ctx, tx, kind, repo, peak); err != nil {
-				return err
-			}
+		run, err := l.recordRun(ctx, tx, jobID, kind, repo, peak, to)
+		if err != nil {
+			return err
 		}
-		return event(ctx, tx, l.ms(), "cluster.job."+to, jobID, "", map[string]any{"reason": truncate(reason, 500), "peak_rss_mb": peak})
+		return event(ctx, tx, l.ms(), "cluster.job."+to, jobID, "", map[string]any{"reason": truncate(reason, 500),
+			"end_reason": endReason, "peak_rss_mb": peak, "typical_rss_mb": run.TypicalMB, "cpu_cores_p90": run.CPU})
 	})
 }
 
@@ -511,8 +612,12 @@ func (l *Ledger) Cancel(ctx context.Context, jobID, by string) (Job, error) {
 // reservation stays: the agent is very likely still working.
 func (l *Ledger) SetDisconnected(ctx context.Context, jobID string, disconnected bool) error {
 	return l.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `UPDATE jobs SET disconnected=?, updated_at=? WHERE id=? AND state=? AND disconnected<>?`,
-			boolInt(disconnected), l.ms(), jobID, Running, boolInt(disconnected))
+		at := int64(0)
+		if disconnected {
+			at = l.ms()
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE jobs SET disconnected=?, disconnected_at=?, updated_at=? WHERE id=? AND state=? AND disconnected<>?`,
+			boolInt(disconnected), at, l.ms(), jobID, Running, boolInt(disconnected))
 		if err != nil {
 			return err
 		}
@@ -542,8 +647,11 @@ func (l *Ledger) Observe(ctx context.Context, jobID string, rssMB int64, cpu flo
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET observed_rss_mb=?, observed_cpu=?, peak_rss_mb=MAX(peak_rss_mb,?) WHERE id=? AND state=?`,
-			rssMB, cpu, rssMB, jobID, Running); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET observed_rss_mb=?, observed_cpu=?, peak_rss_mb=MAX(peak_rss_mb,?),
+			peak_cpu=MAX(peak_cpu,?) WHERE id=? AND state=?`, rssMB, cpu, rssMB, cpu, jobID, Running); err != nil {
+			return err
+		}
+		if err := addSample(ctx, tx, jobID, l.ms(), rssMB, cpu); err != nil {
 			return err
 		}
 		if rssMB > reserved {
@@ -559,43 +667,17 @@ func (l *Ledger) Observe(ctx context.Context, jobID string, rssMB int64, cpu flo
 	return grew, err
 }
 
-// learn folds a finished job's peak into the history for its kind and
-// repository, as an exponentially weighted average that leans on recent runs.
-func learn(ctx context.Context, tx *sql.Tx, kind, repo string, peak int64) error {
-	for _, r := range []string{repo, ""} {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO history(kind,repo,peak_rss_mb,samples) VALUES(?,?,?,1)
-			ON CONFLICT(kind,repo) DO UPDATE SET peak_rss_mb = peak_rss_mb*0.7 + excluded.peak_rss_mb*0.3, samples = samples+1`,
-			kind, r, float64(peak)); err != nil {
-			return err
-		}
-		if repo == "" {
-			break
-		}
-	}
-	return nil
-}
-
 // Estimate is the learned memory estimate for a kind and repository: the
-// repository's own history when there is some, otherwise the kind's. ok is
-// false when nothing has been learned yet.
+// configured percentile of recent runs in this repository when there are
+// some, otherwise of the kind's runs anywhere, plus headroom. ok is false
+// when nothing has been learned yet. It uses the default window and
+// percentile; Profile takes them as arguments.
 func (l *Ledger) Estimate(ctx context.Context, kind, repo string, headroomPct float64) (mb int64, source string, ok bool, err error) {
-	for _, r := range []string{repo, ""} {
-		var peak float64
-		var n int
-		e := l.db.QueryRowContext(ctx, `SELECT peak_rss_mb, samples FROM history WHERE kind=? AND repo=?`, kind, r).Scan(&peak, &n)
-		if errors.Is(e, sql.ErrNoRows) {
-			continue
-		}
-		if e != nil {
-			return 0, "", false, e
-		}
-		src := fmt.Sprintf("history:%s (%d runs)", kind, n)
-		if r != "" {
-			src = fmt.Sprintf("history:%s@%s (%d runs)", kind, r, n)
-		}
-		return int64(math.Ceil(peak * (1 + headroomPct/100))), src, true, nil
+	p, err := l.Profile(ctx, kind, repo, DefaultWindow, DefaultPercentile)
+	if err != nil || p.MemoryRuns == 0 {
+		return 0, "", false, err
 	}
-	return 0, "", false, nil
+	return int64(math.Ceil(float64(p.MemoryMB) * (1 + headroomPct/100))), p.MemorySource, true, nil
 }
 
 // Decision is a stored placement decision.

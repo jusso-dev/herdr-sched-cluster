@@ -7,6 +7,68 @@ uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-11
+
+Every bullet of sections 3.3 to 12 of the brief is now audited in
+`docs/IMPLEMENTATION-CHECKLIST.md`: 166 bullets, 154 met, 10 partial and 2
+missing, each partial or missing one with the reason (mostly Herdr 0.9.3 has
+no supported way) and the alternative.
+
+### Added
+
+- Lost versus finished: an agent that disappears is `finished` only when its
+  pane still has the same shell. A new shell is `lost` (`herdr_restarted`),
+  a missing pane is `lost` (`session_vanished`), and a worker unreachable for
+  `cluster_lost_after_seconds` makes its jobs `lost` (`worker_unreachable`),
+  taken back as running if the agent reappears.
+- `--restartable` jobs are retried after being lost, when
+  `cluster_retry_lost` is on and the pane shows nothing but its shell.
+- Worktree retention: `cluster_worktree_retention` (`retain-on-failure`,
+  `always-retain`, `always-remove`, `age`), `cluster_worktree_max_age_hours`,
+  `cluster_worktree_remove_dirty` and `cluster_delete_branches` (merged
+  branches only).
+- CPU learning: each run's process-tree CPU is stored and the estimate is a
+  rolling percentile, like memory. Memory moved from an exponentially
+  weighted peak to the same percentile (`cluster_history_window`,
+  `cluster_history_percentile`). Ledger schema v2 migrates v1 history.
+- New placement limits: `max_cpu_utilisation_percent` (default 85),
+  `memory_reserve_percent`, `max_swap_pressure` (default `moderate`) and
+  `cluster_max_agents_per_repo`.
+- Herdr's `machine status` is read every `cluster_machine_status_seconds` and
+  a machine whose Herdr is unreachable takes nothing (`herdr_unreachable`).
+- Worker identity is recorded on first contact; a changed machine shows
+  `incompatible` until `cluster reregister` (MCP `cluster_reregister`, gated
+  as `sched.cluster.reregister`).
+- Per-worker `path_map` in `cluster-workers.json`.
+- `--depends_on`, `--clone_url` (cloning through the new typed
+  `hsched cluster gitop`), `--disposable` with `cluster_pressure_action =
+  "terminate-disposable"` and `cluster_pressure_grace_seconds`.
+- `adaptive` policy, which picks `memory`, `performance` or `balanced` each
+  pass and says why.
+- `cluster attach` and `cluster estimates` (MCP `cluster_attach`,
+  `cluster_estimates`), capacity recommendations and per-job next action in
+  `cluster status`, `queue` and `explain`.
+- `cluster_max_queue_size`, `cluster_queue_enabled`, `cluster_owner_checks`,
+  `cluster_verify_identity` and `cluster_explanations`.
+- Metrics `hsched_cluster_committed_cpu`, `hsched_cluster_herdr_reachable`
+  and `hsched_cluster_jobs_ended`.
+- Simulation scenarios for each of the above, and Herdr restarts and closed
+  sessions in the no-double-dispatch property test.
+
+### Changed
+
+- A dispatch interrupted before the agent start is cleaned up (its workspace
+  found by label and closed) and requeued; one interrupted after it fails with
+  `dispatch_interrupted` instead of being retried.
+- A worktree job in a repository with no commits fails with
+  `empty_repository` and a clear message, instead of requeueing forever.
+
+### Fixed
+
+- `herdr pane process-info` is called with `--pane`, as Herdr 0.9.3 requires.
+  v0.4.0 passed the pane as a bare argument, which Herdr refuses, so
+  per-agent process sampling failed against real Herdr.
+
 ## [0.4.0] - 2026-10-11
 
 ### Added

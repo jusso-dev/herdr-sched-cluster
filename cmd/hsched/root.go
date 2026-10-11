@@ -25,6 +25,7 @@ func newRootCmdWith(serve func(mcpdoor.Options) error) *cobra.Command {
 	root := cli.Root(cli.Send)
 	root.AddCommand(newDaemonCmd(), newMCPCmd(serve), newVersionCmd())
 	attachUnder(root, "cluster", newProbeCmd())
+	attachUnder(root, "cluster", newGitOpCmd())
 	return root
 }
 

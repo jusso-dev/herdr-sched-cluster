@@ -134,6 +134,31 @@ type ClusterEventsReport struct {
 	Count  int            `json:"count"`
 }
 
+// EstimatesReport is what cluster.estimates answers.
+type EstimatesReport struct {
+	Estimates   []ledger.Profile `json:"estimates"`
+	Window      int              `json:"window"`
+	Percentile  float64          `json:"percentile"`
+	HeadroomPct float64          `json:"headroom_pct"`
+	Count       int              `json:"count"`
+}
+
+// ownerCheck refuses to let one agent cancel or detach another's job when
+// cluster_owner_checks is on. The operator ("human") may act on any job.
+func ownerCheck(ctx context.Context, c *coord.Coordinator, id, caller, what string) error {
+	if !c.Cfg.OwnerChecks || caller == "human" || caller == "" {
+		return nil
+	}
+	j, err := c.L.Get(ctx, id)
+	if err != nil {
+		return notFound(err, id)
+	}
+	if j.SubmittedBy != "" && j.SubmittedBy != caller {
+		return codes.Refusef(codes.Invalid, "%s was submitted by %s, so %s may not %s it (cluster_owner_checks); ask the operator", id, j.SubmittedBy, caller, what)
+	}
+	return nil
+}
+
 // MetricsReport is what cluster.metrics answers.
 type MetricsReport struct {
 	Text string `json:"text"`
@@ -204,6 +229,14 @@ func (d *Daemon) serveCluster(ctx context.Context, verb string, req protocol.Req
 			}
 		}
 		r.AgentArgs = strings.Fields(str("agent_args"))
+		r.Restartable, _ = req.Args["restartable"].(bool)
+		r.Disposable, _ = req.Args["disposable"].(bool)
+		r.CloneURL = str("clone_url")
+		for _, dep := range strings.Split(str("depends_on"), ",") {
+			if dep = strings.TrimSpace(dep); dep != "" {
+				r.DependsOn = append(r.DependsOn, dep)
+			}
+		}
 		job, notes, err := c.Submit(ctx, r)
 		if err != nil {
 			if errors.Is(err, ledger.ErrNotFound) {
@@ -252,6 +285,9 @@ func (d *Daemon) serveCluster(ctx context.Context, verb string, req protocol.Req
 		ex, err := c.Explain(ctx, str("id"))
 		return encode(ex, notFound(err, str("id")))
 	case "cluster.cancel":
+		if err := ownerCheck(ctx, c, str("id"), req.Caller(), "cancel"); err != nil {
+			return nil, err
+		}
 		j, err := c.L.Cancel(ctx, str("id"), req.Caller())
 		if err == nil {
 			d.logf("%s cancelled cluster job %s", req.Caller(), j.ID)
@@ -261,6 +297,9 @@ func (d *Daemon) serveCluster(ctx context.Context, verb string, req protocol.Req
 		id := str("id")
 		if _, err := c.L.Get(ctx, id); err != nil {
 			return nil, notFound(err, id)
+		}
+		if err := ownerCheck(ctx, c, id, req.Caller(), "detach"); err != nil {
+			return nil, err
 		}
 		if err := c.L.Finish(ctx, id, ledger.Detached, "detached by "+req.Caller()); err != nil {
 			if errors.Is(err, ledger.ErrConflict) {
@@ -292,6 +331,20 @@ func (d *Daemon) serveCluster(ctx context.Context, verb string, req protocol.Req
 	case "cluster.metrics":
 		text, err := Metrics(ctx, c)
 		return encode(MetricsReport{Text: text}, err)
+	case "cluster.attach":
+		h, err := c.Attach(ctx, str("id"))
+		return encode(h, notFound(err, str("id")))
+	case "cluster.estimates":
+		ps, err := c.Estimates(ctx)
+		return encode(EstimatesReport{Estimates: ps, Window: c.Cfg.HistoryWindow, Percentile: c.Cfg.HistoryPercentile,
+			HeadroomPct: c.Cfg.HistoryHeadroomPct, Count: len(ps)}, err)
+	case "cluster.reregister":
+		id, err := c.Reregister(ctx, str("worker"), req.Caller())
+		if err != nil {
+			return nil, codes.Errorf(codes.NotFound, "%v", err)
+		}
+		d.logf("%s cleared the remembered identity of worker %s", req.Caller(), id)
+		return encode(ClusterWorkerChange{Worker: id}, nil)
 	}
 	return nil, codes.Refusef(codes.Invalid, "verb %q is declared and not served", verb)
 }
@@ -347,7 +400,7 @@ func planRequests(req protocol.Request) ([]coord.SubmitRequest, error) {
 		m, _ := raw.(map[string]any)
 		s := func(k string) string { v, _ := m[k].(string); return strings.TrimSpace(v) }
 		r := coord.SubmitRequest{Kind: s("kind"), Repo: s("repo"), Policy: s("policy"), Machine: s("machine"),
-			OS: s("os"), Arch: s("arch"), SubmittedBy: caller}
+			OS: s("os"), Arch: s("arch"), SubmittedBy: caller, CloneURL: s("clone_url")}
 		if v, ok := m["memory_mb"]; ok {
 			n, err := wholeNumber(v)
 			if err != nil {
@@ -423,6 +476,14 @@ func Metrics(ctx context.Context, c *coord.Coordinator) (string, error) {
 		name, help string
 		val        func(id string, s resource.Snapshot, r ledger.WorkerRow, ld ledger.Load) float64
 	}
+	extras, err := c.L.WorkerExtras(ctx)
+	if err != nil {
+		return "", err
+	}
+	ended, err := c.L.EndReasons(ctx)
+	if err != nil {
+		return "", err
+	}
 	snaps := map[string]resource.Snapshot{}
 	loads := map[string]ledger.Load{}
 	for _, id := range ids {
@@ -464,6 +525,18 @@ func Metrics(ctx context.Context, c *coord.Coordinator) (string, error) {
 		{"hsched_cluster_probe_latency_ms", "Round trip of the last probe", func(_ string, _ resource.Snapshot, r ledger.WorkerRow, _ ledger.Load) float64 {
 			return float64(r.LatencyMS)
 		}},
+		{"hsched_cluster_committed_cpu", "CPU cores committed to active cluster jobs", func(_ string, _ resource.Snapshot, _ ledger.WorkerRow, ld ledger.Load) float64 {
+			return ld.CommittedCPU
+		}},
+		{"hsched_cluster_herdr_reachable", "1 when herdr machine status last said reachable, 0 otherwise, -1 not checked", func(id string, _ resource.Snapshot, _ ledger.WorkerRow, _ ledger.Load) float64 {
+			switch extras[id].HerdrStatus {
+			case "":
+				return -1
+			case "reachable":
+				return 1
+			}
+			return 0
+		}},
 	}
 	for _, s := range all {
 		gauge(s.name, s.help)
@@ -475,6 +548,22 @@ func Metrics(ctx context.Context, c *coord.Coordinator) (string, error) {
 	states := []string{ledger.Queued, ledger.Reserved, ledger.Dispatching, ledger.Running, ledger.Finished, ledger.Failed, ledger.Cancelled, ledger.Lost, ledger.Detached}
 	for _, st := range states {
 		fmt.Fprintf(&b, "hsched_cluster_jobs{state=%q} %d\n", st, counts[st])
+	}
+	gauge("hsched_cluster_jobs_ended", "Ended cluster jobs by state and end reason (agent_exited, session_vanished, herdr_restarted, worker_unreachable, ...)")
+	var es []string
+	for st := range ended {
+		es = append(es, st)
+	}
+	sort.Strings(es)
+	for _, st := range es {
+		var rs []string
+		for r := range ended[st] {
+			rs = append(rs, r)
+		}
+		sort.Strings(rs)
+		for _, r := range rs {
+			fmt.Fprintf(&b, "hsched_cluster_jobs_ended{state=%q,reason=%q} %d\n", st, r, ended[st][r])
+		}
 	}
 	return b.String(), nil
 }

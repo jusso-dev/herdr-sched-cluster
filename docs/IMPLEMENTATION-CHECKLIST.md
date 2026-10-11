@@ -108,37 +108,246 @@ This file is updated in the same commit as the work it describes.
 | Registration with Claude Code, Codex, OpenCode | done: `setup-agents` action; each agent's `mcp list` checked against the real binary |
 | MCP over stdio with a JSON-RPC client | done (`scripts/mcp-smoke.py`) |
 
-## Brief gap check (sections 3.3 to 12)
+## Brief audit (sections 3.3 to 12), v0.5.0
 
-This check is against the section topics of the brief. The full text of those
-sections was not available to this build either (the copy was truncated a
-second time), so anything below marked against a topic, not a requirement, is
-for Justin to confirm.
+Every bullet of [the brief](BRIEF-sections-3.3-12.md) is listed with its status and the file or test that shows it. "Blocked by Herdr" means Herdr 0.9.3 has no supported way to do it; the alternative is named.
 
-| Topic | Status |
-| --- | --- |
-| Adaptive estimation | partial: memory learned per agent kind and repository (EWMA of observed peak RSS, with headroom), used when `memory_mb` is omitted, in both submit and plan. CPU is not learned; it uses `cluster_default_cpu` or the request |
-| Example scenario (ten agents on the MacBook Pro and Mac mini) | done in simulation (scenario 1 and `TestPlanMatchesWhatSubmitThenDoes`); not run on the real Macs |
-| Worker architecture | done as a design choice: no worker daemon. The coordinator probes each worker over SSH with `hsched cluster probe` and drives Herdr with `herdr --machine`. A worker only needs the plugin installed |
-| Agent lifecycle | partial: queued, reserved, dispatching, running, finished, failed, cancelled, detached. A worker Herdr restart is recorded as finished, not lost |
-| Workspace and Git isolation | partial: automatic Herdr worktree when a repository is already busy on that machine, or on request. Fails on a repository with no commits (the job requeues). Worktrees are not cleaned up after the agent finishes |
-| Queue: head-of-line blocking | done: backfill places smaller jobs past a blocked head; the starvation guard holds a worker clear for a job that has waited too long |
-| Queue: reason output | done: `cluster queue` (new) and `cluster explain` |
-| Load balancing | done: six policies over the same hard limits |
-| Memory pressure protection | done: critical pressure is a hard limit, elevated pressure and swapping are warnings, overruns raise the reservation. Nothing is killed |
-| Herdr integration CLI | partial: Herdr has no way for a plugin to add `herdr` subcommands, so the CLI is `hsched cluster ...`, plus Herdr actions (dashboard, restart, stop, setup-agents) |
-| Observability | done: `explain`, `queue`, `events`, `metrics` (Prometheus text, optional loopback endpoint), dashboard popup |
-| Security | done: fixed SSH argv with an allow-list, `0600` ledger, prompts never logged, loopback-only metrics, mutating verbs behind the policy gate |
-| Configuration | done: `cluster_*` keys in `sched.toml` and `cluster-workers.json`, all documented and validated |
+Totals: 166 bullets, 154 met, 10 partial, 2 missing.
+
+### 3.3 Adaptive agent resource estimation
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| Do not assume every agent needs the same memory | met | Per kind and repository profiles: `ledger/runs.go`, `coord/submit.go` (prepare); `TestCPUIsLearnedPerKindAndRepo` |
+| Profile for Claude Code | met | Profiles are keyed by Herdr agent kind, `claude` included; `ledger/runs.go` |
+| Profile for OpenAI Codex CLI | met | As above, kind `codex` |
+| Profile for OpenCode | met | As above, kind `opencode` |
+| Profile for other Herdr-supported agents | met | Any kind Herdr starts gets its own profile; `resource/collect.go` finds installed CLIs |
+| Profile for custom CLI agents | missing (blocked by Herdr) | `herdr agent start` only accepts Herdr's own `--kind` values, so an arbitrary command cannot be started as an agent. Alternative: run it under a supported kind with `agent_args` |
+| Typical idle memory | partial | Each run records `typical_rss_mb` (median of samples) beside the peak, `ledger/runs.go`; idle and working phases are not told apart because Herdr's agent state is not sampled with memory |
+| Peak working memory | met | `runs.peak_rss_mb`, used for estimates; `TestPercentileNearestRank` |
+| CPU usage | met | Process-tree CPU per sample, learned per kind and repository and enforced against `max_cpu_utilisation_percent`; `TestV05CPULearnedAndEnforced` |
+| Resource use during builds and tests | partial | Builds and tests run in the agent's process tree, so their memory and CPU are in the peak; they are not labelled as a separate phase |
+| Resource use for large repositories | met | Profiles are per repository first, then per kind; `TestCPUIsLearnedPerKindAndRepo` |
+| Concurrent process-tree consumption | met | Whole tree under the pane shell, `resource/collect_linux.go` and `collect_darwin.go` (`sampleTrees`) |
+| Configurable default for unknown workloads | met | `cluster_default_memory_mb`, `cluster_default_cpu`; `TestV05Keys` |
+| Rolling percentiles | met | Nearest-rank percentile over the last `cluster_history_window` runs at `cluster_history_percentile`; `TestPercentileNearestRank` |
+| No LLM in basic scheduling | met | Placement is deterministic code, `placement/` |
+| Any AI estimation advisory, bounded, replaceable | met | There is none; every estimate is deterministic and explained (`cluster explain`, `cluster estimates`) |
+
+### 3.4 Example scheduling scenario
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| Evaluate both machines | met | `TestScenario01TenAgentsCompeteForMemory` |
+| Reserve configurable memory for the OS | met | `min_free_memory_mb` and `memory_reserve_percent`; `TestMemoryReservePercent` |
+| Account for running and queued reservations | met | `placement.Worker.PendingMemoryMB`, `TestScenario01TenAgentsCompeteForMemory` |
+| Allocate by available capacity | met | `TestScenario01TenAgentsCompeteForMemory`, `TestPlanMatchesWhatSubmitThenDoes` |
+| Prevent overcommit beyond limits | met | Reservation re-checked in one transaction; `TestScenario10ConcurrentSubmissions`, `TestPropertyNoDoubleDispatch` |
+| Queue what cannot be admitted | met | `TestScenario01TenAgentsCompeteForMemory` |
+| Dispatch queued agents as capacity frees | met | `TestScenario01TenAgentsCompeteForMemory`, `TestScenario05LargeJobIsNotStarved` |
+| Figures illustrative, separate memory pools | met | Nothing is hard-coded; each worker is its own pool. Not yet run on the real MacBook Pro and Mac mini |
+
+### 4. Distributed worker architecture
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| Worker component only where Herdr is insufficient | met | No worker daemon; `hsched cluster probe` and `hsched cluster gitop` run over SSH on demand |
+| Report system metrics | met | `resource/`, `cluster probe` |
+| Advertise supported agent runtimes | met | `Snapshot.Agents`, `resource/collect.go` (`findAgents`), static `agents` |
+| Accept authenticated dispatches | met | Herdr's saved machines over SSH, `herdrx/`, `transport/` |
+| Start sessions through Herdr | met | `herdr workspace create`, `worktree create`, `agent start`, `agent prompt`; `coord/dispatch.go` |
+| Track process trees and resource use | met | `coord/upkeep.go` (Observe), `TestScenario09OverrunRaisesReservation` |
+| Report session lifecycle events | met | `cluster.reconcile.*` events, `coord/reconcile.go` |
+| Graceful termination | partial (blocked by Herdr) | Herdr 0.9.3 has no `agent stop`; terminating closes the workspace (`coord/upkeep.go` Pressure). Alternative: `detach` and stop the agent in Herdr yourself |
+| Reconnect after network interruptions | met | `TestScenario03DisconnectKeepsAgentsAndCapacity`, `TestV05UnreachableThenLostThenReadopted` |
+| Reuse Herdr's machine connections | met | `herdr --machine`, `herdr machine status`; `TestV05MachineStatusHealth` |
+| No separate privileged daemon | met | Design, `docs/ARCHITECTURE.md` |
+| No root or administrator | met | Everything runs as the user |
+| Coordinator: maintain worker state | met | `coord/coord.go` (targets, machine status, identity) |
+| Coordinator: schedule and dispatch | met | `coord/dispatch.go` |
+| Coordinator: manage reservations | met | `ledger/` |
+| Coordinator: queue workloads | met | `queue/` |
+| Coordinator: track active sessions | met | `coord/reconcile.go` |
+| Coordinator: detect failed workers | met | Unreachable, `herdr_unreachable`, lost after `cluster_lost_after_seconds`; `TestScenario02WorkerUnavailableDuringDispatch`, `TestV05UnreachableThenConfirmedLost` |
+| Coordinator: recover after restart | met | `TestScenario04CoordinatorRestart`, `TestV05CrashMidDispatchIsRetriedSafely` |
+| Coordinator: prevent duplicate dispatches | met | Start intents and tokens; `TestPropertyNoDoubleDispatch`, `TestV05CrashAfterStartIntentIsNotRetried` |
+| SQLite persistence | met | `ledger/ledger.go`, schema v2; `TestMigrateFromSchema1` |
+| Single coordinator, safe restart, explicit ownership | met | Daemon lock, reservation tokens; `TestIntentsNeedTheToken` |
+| No consensus or cluster complexity | met | Design |
+
+### 5. Agent lifecycle management
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| Lifecycle states | met | queued, reserved, dispatching, running, finished, failed, cancelled, detached, lost; worker evaluation is the pass itself and is recorded by `explain`; `ledger/jobs.go` |
+| Unique job ids | met | `ledger` (`j<n>`) |
+| Idempotent dispatch | met | Workspace label lookup and start intent; `TestV05CrashMidDispatchIsRetriedSafely` |
+| Reservation tracking | met | `ledger/` |
+| Dispatch timeouts | met | `cluster_dispatch_timeout_seconds`, `cluster_dispatch_grace_seconds` |
+| Retry policies | met | `cluster_max_attempts`, `--restartable`, `cluster_retry_lost`; `TestV05RestartableLostJobIsRetried` |
+| Cancellation | met | `cluster cancel` |
+| Graceful shutdown | met | Stopping the daemon leaves agents running and the ledger consistent; `TestScenario04CoordinatorRestart` |
+| Job prioritisation | met | `queue/` |
+| Queue visibility | met | `cluster queue`, `cluster status` |
+| Recovery after coordinator restart | met | `TestScenario04CoordinatorRestart`, `TestV05CrashAfterStartIntentIsNotRetried` |
+| Never launched twice | met | `TestPropertyNoDoubleDispatch` (now with Herdr restarts and closed sessions) |
+| Reconcile with real Herdr sessions | met | `coord/reconcile.go`; `TestV05LostWhenHerdrRestarts`, `TestV05FinishedIsNotLost` |
+| Reconnect to sessions through Herdr | met | Agents live in Herdr's own server; `cluster attach` |
+| Do not kill agents when the UI closes | met | The scheduler never kills an agent it did not mark disposable |
+| Reattach to remote sessions | partial (blocked by Herdr) | Herdr refuses attach across `--machine`; `cluster attach` prints `herdr --remote <target>` and `herdr agent focus`. `TestClusterOwnerChecksAndNewVerbs` |
+| Preserve agent-native session ids | missing (blocked by Herdr) | Herdr 0.9.3 does not expose an agent's own session id. Alternative: the agent's pane and workspace persist in Herdr |
+| No claim of live migration | met | README, Limitations |
+
+### 6. Workspace and Git isolation
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| Isolated workspace per agent | met | One Herdr workspace per job; `TestScenario06SameRepoUsesWorktrees` |
+| Git worktrees | met | `herdr worktree create` |
+| Separate branches | met | `hsc/j<n>` (and `-<attempt>`), `coord/dispatch.go` (branchFor) |
+| Clone when required | met | `--clone_url`, `gitop/`; `TestV05CloneWhenMissing`, `TestCloneNeverWritesOverAnExistingPath` |
+| Reuse existing repositories | met | Default path |
+| Workspace cleanup | met | `coord/upkeep.go` (Cleanup); `TestV05WorktreeRetention` |
+| Persistent workspaces | met | `always-retain`; `TestV05WorktreeRetention` |
+| Shared repository metadata | met | Worktrees share the repository's `.git` |
+| Repository-to-worker affinity | met | `repo_affinity` and `repo_locality` scores, `placement/score.go` |
+| Worktrees by default for one repo, one machine | met | `TestScenario06SameRepoUsesWorktrees` |
+| Explicit clone or sync across machines | met | `--clone_url` and per-worker `path_map`; `TestV05PathMapping` |
+| No shared worktree across filesystems | met | Worktrees are made on the worker that runs the job |
+| No two agents in one directory | met | ExclusiveRepo rule; `TestRepoRules` |
+| Configurable retention | met | `cluster_worktree_retention` and friends; `TestV05WorktreeRetention` |
+
+### 7. Intelligent queue management
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| Persistent queue | met | `ledger/` |
+| Priorities | met | `queue/` |
+| FIFO within priority | met | `queue/` tests |
+| Resource requirements | met | memory, CPU, labels, OS, arch |
+| Dependencies | met | `--depends_on`; `TestV05Dependencies` |
+| Per-project concurrency limits | met | `cluster_max_agents_per_repo`; `TestRepoRules` |
+| Per-machine concurrency limits | met | `max_agents` |
+| Ageing | met | `cluster_ageing_minutes`, starvation guard; `TestScenario05LargeJobIsNotStarved` |
+| Cancellation | met | `cluster cancel` |
+| Retry limits | met | `cluster_max_attempts` |
+| Scheduling history | met | Event trail and `runs`; `cluster events`, `cluster estimates` |
+| Re-evaluate waiting jobs as capacity frees | met | Every tick; `TestScenario01TenAgentsCompeteForMemory` |
+| No head-of-line blocking | met | Backfill; `TestQueueViewExplainsAndDoesNotBlockOnItsHead` |
+| Clear reasons, with next action | met | Per-worker reasons and `next_action` in `cluster queue` and `explain` |
+
+### 8. Automatic load balancing
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| Continuous health evaluation | met | Tick: reconcile, observe, pressure, cleanup, pump; `coord/upkeep.go` |
+| Admission control | met | Hard limits in `placement/` |
+| Dynamic placement of queued agents | met | `pump` |
+| Detect sustained pressure | met | `TestPressureDuration` |
+| Worker draining | met | `TestScenario08Draining` |
+| Optional cancel and restart of eligible jobs | met | `--disposable` with `--restartable`; `TestV05PressureTerminatesDisposable` |
+| Policy adjustments | met | `adaptive`; `TestAdaptivePolicy` |
+| Capacity recommendations | met | `recommendations` in `cluster status`, `coord/plan.go` |
+| No live migration | met | Design |
+| Relocation only by explicit checkpoint and restart | partial (blocked by Herdr) | No agent checkpoint or resumable session is exposed. Alternative: `detach` and resubmit, or `--restartable` to start afresh elsewhere |
+| Never interrupt an agent to balance load | met | Only disposable jobs under sustained critical pressure, and only with `terminate-disposable` |
+| Pressure: stop admitting | met | `TestScenario07SuddenMemoryPressure` |
+| Pressure: notify the coordinator | met | `cluster.pressure.*` events |
+| Pressure: re-evaluate the queue | met | Every tick |
+| Pressure: identify top consumers | met | Jobs ranked by observed RSS, `coord/upkeep.go` |
+| Pressure: recommend remediation | met | `recommend`, `cluster status` |
+| Pressure: pause or terminate disposable jobs | partial | Terminate is done (`TestV05PressureTerminatesDisposable`); pause is blocked, Herdr has no way to suspend an agent |
+| Never terminate interactive sessions by default | met | `cluster_pressure_action` defaults to `recommend` |
+
+### 9. Herdr integration
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| Native extension on verified APIs | met | Herdr plugin manifest; Herdr 0.9.3 verbs checked by hand (see below) |
+| Launch with automatic machine selection | met | `cluster submit` |
+| Manual placement override | met | `--machine` |
+| List running agents across workers | met | `cluster jobs`, `cluster workers` |
+| Show the machine per agent | met | `cluster jobs` |
+| Show resource utilisation | met | `cluster workers`, `cluster status` (memory, CPU, pressure) |
+| Inspect queued jobs | met | `cluster queue` |
+| Cancel queued jobs | met | `cluster cancel` |
+| Attach to running sessions | partial (blocked by Herdr) | As in section 5: `cluster attach` gives the commands |
+| Inspect scheduling decisions | met | `cluster explain` |
+| Configure policies | met | `cluster_policy`, `--policy` |
+| Plugin UI, else CLI and dashboard | met | Dashboard action and `hsched cluster` |
+| `herdr scheduler ...` CLI | partial (blocked by Herdr) | Plugins cannot add `herdr` subcommands; the same verbs are `hsched cluster` with `status`, `workers`, `submit`, `queue`, `explain` and `drain` |
+
+### 10. Cluster observability
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| Cluster overview | met | `cluster status` |
+| Worker health | met | states incl. `herdr_unreachable`, `incompatible` |
+| Active agent count | met | `cluster status` |
+| Reservations | met | `cluster workers` |
+| Actual usage | met | Observed RSS and CPU |
+| Queue depth | met | `cluster status`, metrics |
+| Job execution history | met | `cluster jobs`, end reasons |
+| Decision explanations | met | `cluster explain`, `cluster_explanations` |
+| Agent runtime statistics | met | `cluster estimates` |
+| Failure and retry history | met | attempts, end reasons, `cluster events` |
+| Prometheus metrics | met | `cluster metrics`, `cluster_metrics_addr` |
+| Structured logs with correlation ids | partial | Coordinator events carry a tick correlation id; the daemon log itself is still plain text |
+
+### 11. Security
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| SSH or mutual auth | met | Herdr machines and OpenSSH, `BatchMode=yes` |
+| Worker identity verification | met | Trust on first use; `TestIdentityTrustOnFirstUse`, `TestV05IdentityChange` |
+| Least privilege | met | User account only |
+| Allowlisting or typed requests | met | `gitop` typed operations; `TestValidationRefusesAnythingButTheTypedOperations`, `TestGitOpWordsAreQuotedAndValidated` |
+| Secure credential handling | met | No credentials stored; clone URLs with credentials refused |
+| No secrets in logs or DB | met | Prompts never logged (hash only); kept in the ledger only until dispatch |
+| Socket permissions | met | `0600`, state dir `0700` |
+| Job ownership checks | partial | `cluster_owner_checks`, `TestClusterOwnerChecksAndNewVerbs`; advisory, as everyone on the socket is the same user |
+| Command injection protection | met | Fixed argv, checked words; gitop host and user must start alphanumeric |
+| Safe repository paths | met | `gitop`, `herdrx` validation |
+| Worker registration and revocation | met | `herdr machine add/remove`, drain, `probe: off`, `cluster reregister` |
+| Configurable execution permissions | met | Policy gate, per-worker `agents` |
+| No unauthenticated remote execution | met | Nothing listens remotely; metrics loopback only |
+| Prefer Herdr security primitives | met | Herdr machines |
+| No unnecessary credentials to remote agents | met | The scheduler passes none |
+
+### 12. Configuration
+
+| Bullet | Status | Evidence |
+| --- | --- | --- |
+| Human-readable config | met | `sched.toml`, `cluster-workers.json` |
+| policy (adaptive) | met | `cluster_policy = "adaptive"` |
+| max_queue_size | met | `cluster_max_queue_size`; `TestV05QueueCap` |
+| admission_interval_seconds | met | `cluster_tick_seconds` |
+| default_agent_memory_mb | met | `cluster_default_memory_mb` |
+| memory_reserve_percent | met | `cluster_memory_reserve_percent` |
+| max_cpu_utilisation_percent | met | `cluster_max_cpu_utilisation_percent` |
+| max_swap_pressure | met | `cluster_max_swap_pressure`; `TestSwapPressureLimit` |
+| workers: name, enabled, max_agents, weight | met | Herdr machine enable/disable, `cluster-workers.json` |
+| workspaces: isolation | met | `cluster_isolation` |
+| workspaces: cleanup_policy | met | `cluster_worktree_retention` |
+| queue: enabled, priority_aging | met | `cluster_queue_enabled`, `cluster_ageing_minutes` (0 is off) |
+| observability: metrics_enabled, scheduling_explanations | met | `cluster_metrics_addr`, `cluster_explanations` |
+| Validate config at startup | met | `TestConfigValidation`, `TestV05Keys` |
+| All resource limits configurable | met | README, Configuration |
+### Herdr 0.9.3 behaviour checked by hand
+
+- `herdr pane process-info` needs `--pane <id>`; v0.4.0 passed the pane as a bare argument, which Herdr refuses. Fixed in v0.5.0.
+- An idle pane lists its own shell as the foreground process.
+- `worktree create` in a repository with no commits fails with `worktree_create_failed` and `invalid reference: HEAD`.
+- `worktree remove` without `--force` refuses a dirty worktree with `dirty_worktree_requires_force`, closes the workspace when it succeeds, and leaves the branch.
+- An unknown pane is `pane_not_found`.
 
 ## Known gaps
 
-- macOS collectors and the macOS process sampler have not run on Apple hardware.
+- Custom CLI agents, agent-native session ids, pausing, checkpoint relocation, a graceful agent stop, attaching across `--machine` and `herdr` subcommands are all blocked by Herdr 0.9.3, as above.
+- Idle memory and build or test phases are not measured separately.
+- The daemon log is plain text; correlation ids are on coordinator events only.
+- Owner checks are advisory.
+- A lost job that is retried gets a fresh workspace; the old worktree is no longer tracked for cleanup and is left in place.
+- macOS collectors have not run on Apple hardware, and there has been no run on two real machines.
 - No live Windows collector; Windows workers are static only.
-- A worker Herdr restart is recorded as `finished`, not `lost`.
-- `herdr machine status` is read by the adapter but not used for placement.
-- No per-worker repository path mapping.
-- No end-to-end run against real Herdr servers on two machines, or on macOS.
-- CPU use is not learned from history.
-- Worktrees are not cleaned up, and cannot be made in a repository with no commits.
-- Sections 3.3 to 12 of the brief were truncated in every copy this work has seen; the check above is against their topics. See GAP-ANALYSIS section 7.

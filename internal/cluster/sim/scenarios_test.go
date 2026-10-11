@@ -59,6 +59,7 @@ func (r *rig) open() {
 	r.l = l
 	r.c = coord.New(l, r.cl.Herdr(), r.cl.Prober(), r.cfg)
 	r.c.Now = r.cl.Clock.Now
+	r.c.G = r.cl.GitOps()
 }
 
 func (r *rig) submit(mem int64, mods ...func(*coord.SubmitRequest)) ledger.Job {
@@ -117,6 +118,17 @@ func (r *rig) check() {
 	byName := map[string]ledger.Job{}
 	for _, j := range active {
 		byName[ledger.AgentName(j.ID)] = j
+	}
+	// A job lost because its worker stopped answering may still have its
+	// agent running there; that is the point of not retrying it.
+	lost, err := r.l.List(ctx, ledger.Lost)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	for _, j := range lost {
+		if j.EndReason == ledger.EndWorkerUnreachable {
+			byName[ledger.AgentName(j.ID)] = j
+		}
 	}
 	r.cl.With(func() {
 		for id, m := range r.cl.Machines {

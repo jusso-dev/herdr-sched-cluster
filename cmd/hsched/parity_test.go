@@ -127,6 +127,7 @@ func TestTheSubcommandTreeHoldsOnlyVerbsAndTheNamedExemptions(t *testing.T) {
 		"version":    "§13.4: it answers off this binary rather than the daemon, so it works with no daemon at all — doctor relays the same two facts over both doors",
 		"completion": "cobra's own shell-completion command, which describes this binary to a shell",
 		"probe":      "`hsched cluster probe` measures THIS machine and talks to no daemon, so a coordinator can run it on a remote worker over SSH; the daemon's cluster.workers verb carries the same readings on both doors",
+		"gitop":      "`hsched cluster gitop` runs one typed Git operation on THIS machine for a coordinator over SSH (delete a merged scheduler branch, clone into an empty path); it talks to no daemon, and the coordinator drives it as part of cleanup and dispatch, never as a caller-facing verb",
 	}
 	// A group — `parked`, `job` — is a command that carries subcommands and
 	// does nothing itself. It is read off the registry rather than listed

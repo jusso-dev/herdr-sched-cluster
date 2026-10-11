@@ -8,12 +8,17 @@ package coord
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/ledger"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/placement"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/queue"
 	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/resource"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/transport"
 )
+
+const ledgerRunsKept = ledger.RunsKept
 
 // Probe modes for a worker.
 const (
@@ -41,7 +46,26 @@ type WorkerConfig struct {
 	// Program is how the remote hsched is invoked over SSH, overriding
 	// Config.ProbeProgram for this worker.
 	Program string
+	// PathMap rewrites repository paths for this worker, by prefix: the
+	// key is the path as jobs name it, the value is where that tree lives
+	// on this worker. The longest matching prefix wins, matched on whole
+	// path segments.
+	PathMap map[string]string
 }
+
+// Worktree retention policies.
+const (
+	RetainOnFailure = "retain-on-failure" // remove after a normal finish, keep after failed or lost
+	AlwaysRetain    = "always-retain"
+	AlwaysRemove    = "always-remove"
+	RetainForAge    = "age" // keep for cluster_worktree_max_age_hours after the job ends, then remove
+)
+
+// Pressure actions.
+const (
+	PressureRecommend           = "recommend"
+	PressureTerminateDisposable = "terminate-disposable"
+)
 
 // Config is the coordinator's configuration.
 type Config struct {
@@ -70,6 +94,58 @@ type Config struct {
 	Workers  map[string]WorkerConfig
 	// ProbeConcurrency bounds parallel probes.
 	ProbeConcurrency int
+
+	// HistoryWindow and HistoryPercentile are how estimates are learned:
+	// this percentile of the newest HistoryWindow runs.
+	HistoryWindow     int
+	HistoryPercentile float64
+
+	// WorktreeRetention is the cleanup policy for scheduler-made worktrees.
+	WorktreeRetention string
+	// WorktreeMaxAge is how long the age policy keeps a worktree.
+	WorktreeMaxAge time.Duration
+	// WorktreeRemoveDirty lets cleanup remove a worktree with uncommitted
+	// or untracked changes. Off by default: such a worktree is kept.
+	WorktreeRemoveDirty bool
+	// DeleteBranches also deletes the scheduler branch after its worktree
+	// is removed, with git branch -d, which keeps unmerged work.
+	DeleteBranches bool
+
+	// LostAfter is how long a running job's worker may stay unreachable
+	// before the job is recorded as lost. Its agent may still be running;
+	// it is readopted if it turns up again.
+	LostAfter time.Duration
+	// RetryLost retries a lost job whose loss is confirmed, when the job was
+	// submitted as restartable and has attempts left.
+	RetryLost bool
+
+	// MachineStatusEvery is how often `herdr machine status` is read and
+	// folded into placement. Zero turns it off.
+	MachineStatusEvery time.Duration
+
+	// MaxQueueSize refuses a submit when this many jobs already wait.
+	// Zero means no limit.
+	MaxQueueSize int
+	// QueueEnabled false refuses a submit that cannot be placed at once.
+	QueueEnabled bool
+	// MaxPerRepo caps active jobs per repository across the cluster.
+	MaxPerRepo int
+
+	// PressureAction is what happens when a worker's memory pressure is
+	// critical: recommend only, or also terminate jobs submitted as
+	// disposable once it has lasted PressureGrace.
+	PressureAction string
+	PressureGrace  time.Duration
+
+	// VerifyIdentity remembers each worker's identity (host, OS,
+	// architecture) on first contact and refuses work on it if that changes.
+	VerifyIdentity bool
+	// OwnerChecks limits cancel and detach to the job's submitter or the
+	// operator.
+	OwnerChecks bool
+	// Explanations records a placement decision per job. Off keeps only
+	// the summary on the event trail.
+	Explanations bool
 }
 
 // DefaultConfig is the configuration with every default filled in.
@@ -93,12 +169,26 @@ func DefaultConfig() Config {
 		Defaults:           placement.DefaultSettings(),
 		Workers:            map[string]WorkerConfig{},
 		ProbeConcurrency:   4,
+		HistoryWindow:      20,
+		HistoryPercentile:  90,
+		WorktreeRetention:  RetainOnFailure,
+		WorktreeMaxAge:     72 * time.Hour,
+		LostAfter:          30 * time.Minute,
+		RetryLost:          true,
+		MachineStatusEvery: time.Minute,
+		MaxQueueSize:       100,
+		QueueEnabled:       true,
+		PressureAction:     PressureRecommend,
+		PressureGrace:      2 * time.Minute,
+		VerifyIdentity:     true,
+		OwnerChecks:        true,
+		Explanations:       true,
 	}
 }
 
 // Validate checks the values a person could get wrong.
 func (c Config) Validate() error {
-	if _, ok := placement.Policies[c.Policy]; !ok {
+	if !placement.ValidPolicy(c.Policy) {
 		return fmt.Errorf("cluster_policy %q is not one of %v", c.Policy, placement.PolicyNames)
 	}
 	switch c.Isolation {
@@ -112,6 +202,34 @@ func (c Config) Validate() error {
 	if c.MaxAttempts < 1 {
 		return fmt.Errorf("cluster_max_attempts must be at least 1")
 	}
+	if c.HistoryWindow < 1 || c.HistoryWindow > ledgerRunsKept {
+		return fmt.Errorf("cluster_history_window must be between 1 and %d", ledgerRunsKept)
+	}
+	if c.HistoryPercentile <= 0 || c.HistoryPercentile > 100 {
+		return fmt.Errorf("cluster_history_percentile must be above 0 and at most 100")
+	}
+	switch c.WorktreeRetention {
+	case RetainOnFailure, AlwaysRetain, AlwaysRemove, RetainForAge:
+	default:
+		return fmt.Errorf("cluster_worktree_retention %q is not retain-on-failure, always-retain, always-remove or age", c.WorktreeRetention)
+	}
+	if c.WorktreeRetention == RetainForAge && c.WorktreeMaxAge <= 0 {
+		return fmt.Errorf("cluster_worktree_max_age_hours must be positive with the age policy")
+	}
+	switch c.PressureAction {
+	case PressureRecommend, PressureTerminateDisposable:
+	default:
+		return fmt.Errorf("cluster_pressure_action %q is not recommend or terminate-disposable", c.PressureAction)
+	}
+	if c.MaxQueueSize < 0 || c.MaxPerRepo < 0 {
+		return fmt.Errorf("cluster_max_queue_size and cluster_max_agents_per_repo cannot be negative")
+	}
+	if c.LostAfter <= 0 {
+		return fmt.Errorf("cluster_lost_after_seconds must be positive")
+	}
+	if err := validSettings("defaults", c.Defaults); err != nil {
+		return err
+	}
 	for k, w := range c.Workers {
 		switch w.Probe {
 		case "", ProbeAuto, ProbeOff:
@@ -122,6 +240,39 @@ func (c Config) Validate() error {
 		default:
 			return fmt.Errorf("worker %s: probe %q is not auto, static or off", k, w.Probe)
 		}
+		if err := validSettings("worker "+k, w.Settings); err != nil {
+			return err
+		}
+		for from, to := range w.PathMap {
+			if err := transport.ValidatePath(from); err != nil {
+				return fmt.Errorf("worker %s: path_map key: %v", k, err)
+			}
+			if err := transport.ValidatePath(to); err != nil {
+				return fmt.Errorf("worker %s: path_map value: %v", k, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validSettings(where string, s placement.Settings) error {
+	if s.MaxCPUUtilPct > 100 {
+		return fmt.Errorf("%s: max_cpu_utilisation_percent %.0f is above 100", where, s.MaxCPUUtilPct)
+	}
+	if s.MemoryReservePct < 0 || s.MemoryReservePct >= 100 {
+		return fmt.Errorf("%s: memory_reserve_percent must be from 0 to below 100", where)
+	}
+	if s.MaxSwapPressure != "" {
+		ok := false
+		for _, l := range placement.SwapLevels {
+			ok = ok || l == s.MaxSwapPressure
+		}
+		if !ok {
+			return fmt.Errorf("%s: max_swap_pressure %q is not one of %v", where, s.MaxSwapPressure, placement.SwapLevels)
+		}
+	}
+	if s.MaxAgents < 0 {
+		return fmt.Errorf("%s: max_agents cannot be negative", where)
 	}
 	return nil
 }
@@ -157,5 +308,38 @@ func merge(def, w placement.Settings) placement.Settings {
 	if len(w.Agents) > 0 {
 		out.Agents = w.Agents
 	}
+	if w.MaxCPUUtilPct != 0 {
+		out.MaxCPUUtilPct = w.MaxCPUUtilPct
+	}
+	if w.MemoryReservePct != 0 {
+		out.MemoryReservePct = w.MemoryReservePct
+	}
+	if w.MaxSwapPressure != "" {
+		out.MaxSwapPressure = w.MaxSwapPressure
+	}
 	return out
+}
+
+// MapPath rewrites a repository path for one worker by the longest matching
+// prefix in m, on whole path segments. A path with no match is unchanged.
+func MapPath(m map[string]string, p string) string {
+	best, to := "", ""
+	for from, dst := range m {
+		f := strings.TrimRight(from, "/")
+		if f == "" {
+			f = "/"
+		}
+		if p == f || strings.HasPrefix(p, f+"/") || (f == "/" && strings.HasPrefix(p, "/")) {
+			if len(f) > len(best) {
+				best, to = f, strings.TrimRight(dst, "/")
+			}
+		}
+	}
+	if best == "" {
+		return p
+	}
+	if best == "/" {
+		return to + p
+	}
+	return to + strings.TrimPrefix(p, best)
 }

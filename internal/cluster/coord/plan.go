@@ -39,10 +39,15 @@ type PlannedJob struct {
 	CPU            float64 `json:"cpu"`
 	Priority       int     `json:"priority"`
 	EstimateSource string  `json:"estimate_source,omitempty"`
-	Outcome        string  `json:"outcome"`
-	Worker         string  `json:"worker,omitempty"`
-	WorkerLabel    string  `json:"worker_label,omitempty"`
-	Reason         string  `json:"reason"`
+	CPUSource      string  `json:"cpu_source,omitempty"`
+	// CPUAfterPct is the chosen worker's projected CPU utilisation with
+	// this job, against its max_cpu_utilisation_percent.
+	CPUAfterPct float64 `json:"cpu_after_pct,omitempty"`
+	MaxCPUPct   float64 `json:"max_cpu_pct,omitempty"`
+	Outcome     string  `json:"outcome"`
+	Worker      string  `json:"worker,omitempty"`
+	WorkerLabel string  `json:"worker_label,omitempty"`
+	Reason      string  `json:"reason"`
 	// Warnings are the chosen worker's soft concerns, such as the agent not
 	// being on the PATH the probe saw. They do not stop placement.
 	Warnings []string            `json:"warnings,omitempty"`
@@ -127,9 +132,9 @@ func (c *Coordinator) Plan(ctx context.Context, reqs []SubmitRequest) (Plan, err
 			out.Jobs = append(out.Jobs, pj)
 			continue
 		}
-		pj.MemoryMB, pj.CPU, pj.EstimateSource = pr.MemoryMB, pr.CPU, source
+		pj.MemoryMB, pj.CPU, pj.EstimateSource, pj.CPUSource = pr.MemoryMB, pr.CPU, source.memory, source.cpu
 		job := placement.Job{ID: pj.Ref, Kind: pr.Kind, Repo: pr.Repo, MemoryMB: pr.MemoryMB, CPU: pr.CPU, Policy: pr.Policy,
-			Machine: pr.Machine, Labels: pr.Labels, OS: pr.OS, Arch: pr.Arch}
+			Machine: pr.Machine, Labels: pr.Labels, OS: pr.OS, Arch: pr.Arch, MaxPerRepo: c.Cfg.MaxPerRepo, Cloneable: pr.CloneURL != ""}
 		if job.Policy == "" {
 			job.Policy = c.Cfg.Policy
 		}
@@ -167,6 +172,7 @@ func (c *Coordinator) Plan(ctx context.Context, reqs []SubmitRequest) (Plan, err
 		for _, cand := range d.Candidates {
 			if cand.WorkerID == a.WorkerID {
 				pj.Warnings = cand.Warnings
+				pj.CPUAfterPct, pj.MaxCPUPct = cand.CPUAfterPct, cand.MaxCPUPct
 			}
 		}
 		perWorker[a.WorkerID]++
@@ -183,9 +189,8 @@ func (c *Coordinator) Plan(ctx context.Context, reqs []SubmitRequest) (Plan, err
 		pj.Reason = waitReason(d)
 	}
 	for _, w := range workers {
-		s := w.Effective()
 		out.Workers = append(out.Workers, PlanWorker{ID: w.ID, Label: w.Label, State: w.State,
-			FreeBeforeMB: w.FreeMemoryMB(), FreeAfterMB: w.FreeMemoryMB() - usedMB[w.ID], KeepFreeMB: s.MinFreeMemoryMB,
+			FreeBeforeMB: w.FreeMemoryMB(), FreeAfterMB: w.FreeMemoryMB() - usedMB[w.ID], KeepFreeMB: w.KeepFreeMB(),
 			PlannedAgents: perWorker[w.ID], ActiveAgents: w.ActiveAgents})
 	}
 	sort.SliceStable(out.Workers, func(a, b int) bool { return out.Workers[a].ID < out.Workers[b].ID })
@@ -284,6 +289,8 @@ type QueueEntry struct {
 	HeldWorker        string `json:"held_worker,omitempty"`
 	Placeable         bool   `json:"placeable_now"`
 	Reason            string `json:"reason"`
+	// NextAction is what happens next for this job, in plain words.
+	NextAction string `json:"next_action"`
 }
 
 // QueueView is the queue as the next pass would see it.
@@ -340,10 +347,23 @@ func (c *Coordinator) Queue(ctx context.Context) (QueueView, error) {
 		v.Entries = append(v.Entries, QueueEntry{Position: i + 1, Job: j.ID, Kind: j.Kind, Repo: j.Repo, MemoryMB: j.MemoryMB,
 			Priority: j.Priority, EffectivePriority: queue.Effective(e, now, c.Cfg.Queue.Ageing),
 			WaitingSeconds: int64(math.Max(0, now.Sub(j.SubmittedAt).Seconds())), HeldWorker: heldFor[j.ID],
-			Placeable: placeable[j.ID], Reason: reason[j.ID]})
+			Placeable: placeable[j.ID], Reason: reason[j.ID], NextAction: nextAction(placeable[j.ID], heldFor[j.ID] != "", j)})
 	}
 	v.Count = len(v.Entries)
 	return v, nil
+}
+
+// nextAction is the one line a person reads to know what happens next.
+func nextAction(placeable, holding bool, j ledger.Job) string {
+	switch {
+	case placeable:
+		return "Starting on the next pass"
+	case len(j.DependsOn) > 0:
+		return "Waiting for its dependencies, then for available capacity"
+	case holding:
+		return "Waiting for the held worker to free enough capacity"
+	}
+	return "Waiting for available capacity"
 }
 
 // StatusWorker is one worker in the status summary.
@@ -359,6 +379,12 @@ type StatusWorker struct {
 	Pressure     string `json:"pressure,omitempty"`
 	ActiveAgents int    `json:"active_agents"`
 	MaxAgents    int    `json:"max_agents,omitempty"`
+	// CPUUtilPct is the smoothed CPU utilisation; MaxCPUPct the policy
+	// threshold.
+	CPUUtilPct float64 `json:"cpu_util_pct"`
+	MaxCPUPct  float64 `json:"max_cpu_pct,omitempty"`
+	// HerdrStatus is what `herdr machine status` last said.
+	HerdrStatus string `json:"herdr_status,omitempty"`
 	// RoomFor is how many more agents of the default size fit here right
 	// now under every hard limit. It is a guide; plan is the real answer.
 	RoomFor int `json:"room_for_default_agents"`
@@ -376,7 +402,12 @@ type Status struct {
 	DefaultCPU      float64        `json:"default_cpu"`
 	Policy          string         `json:"policy"`
 	Summary         string         `json:"summary"`
-	At              time.Time      `json:"at"`
+	// Recommendations are things worth doing now: a worker under memory
+	// pressure, a queue that cannot drain, lost jobs to look at.
+	Recommendations []string `json:"recommendations,omitempty"`
+	// Ended counts finished, failed and lost jobs by end reason.
+	Ended map[string]map[string]int `json:"ended,omitempty"`
+	At    time.Time                 `json:"at"`
 }
 
 // Status summarises capacity and work in one answer.
@@ -391,13 +422,24 @@ func (c *Coordinator) Status(ctx context.Context) (Status, error) {
 		return st, err
 	}
 	st.Jobs = counts
+	extras, err := c.L.WorkerExtras(ctx)
+	if err != nil {
+		return st, err
+	}
+	if st.Ended, err = c.L.EndReasons(ctx); err != nil {
+		return st, err
+	}
 	st.Queued = counts[ledger.Queued]
 	st.Running = counts[ledger.Running] + counts[ledger.Dispatching] + counts[ledger.Reserved]
 	for _, w := range workers {
 		s := w.Effective()
 		sw := StatusWorker{ID: w.ID, Label: w.Label, State: w.State, OS: w.Snapshot.OS, Arch: w.Snapshot.Arch,
-			TotalMB: w.Snapshot.Memory.TotalMB, FreeMB: w.FreeMemoryMB(), KeepFreeMB: s.MinFreeMemoryMB,
-			Pressure: w.Snapshot.Memory.Pressure, ActiveAgents: w.ActiveAgents, MaxAgents: s.MaxAgents}
+			TotalMB: w.Snapshot.Memory.TotalMB, FreeMB: w.FreeMemoryMB(), KeepFreeMB: w.KeepFreeMB(),
+			Pressure: w.Snapshot.Memory.Pressure, ActiveAgents: w.ActiveAgents, MaxAgents: s.MaxAgents,
+			CPUUtilPct: math.Round(w.UtilPct()*10) / 10, MaxCPUPct: s.MaxCPUUtilPct, HerdrStatus: extras[w.ID].HerdrStatus}
+		if sw.MaxCPUPct < 0 {
+			sw.MaxCPUPct = 0
+		}
 		sw.RoomFor = roomFor(w, placement.Job{ID: "status-probe", MemoryMB: c.Cfg.DefaultMemoryMB, CPU: c.Cfg.DefaultCPU})
 		if w.State == placement.StateReady {
 			st.Ready++
@@ -407,7 +449,29 @@ func (c *Coordinator) Status(ctx context.Context) (Status, error) {
 	}
 	st.Summary = fmt.Sprintf("%d of %d workers ready; room for about %d more agents of %d MB; %d running, %d queued",
 		st.Ready, len(workers), st.RoomFor, c.Cfg.DefaultMemoryMB, st.Running, st.Queued)
+	st.Recommendations = recommendations(st, workers)
 	return st, nil
+}
+
+func recommendations(st Status, workers []placement.Worker) []string {
+	var out []string
+	for _, w := range workers {
+		switch {
+		case w.Snapshot.Memory.Pressure == "critical":
+			out = append(out, fmt.Sprintf("%s is under critical memory pressure; it takes no new work. Drain it or stop its largest job (see cluster_jobs).", nameOrID(w.Label, w.ID)))
+		case w.State == placement.StateHerdrDown:
+			out = append(out, fmt.Sprintf("Herdr reports %s as unreachable; run herdr machine status to see why.", nameOrID(w.Label, w.ID)))
+		case w.State == placement.StateIncompatible:
+			out = append(out, fmt.Sprintf("%s is incompatible (see cluster_workers); if its identity changed on purpose, re-register it.", nameOrID(w.Label, w.ID)))
+		}
+	}
+	if st.Queued > 0 && st.RoomFor == 0 {
+		out = append(out, fmt.Sprintf("%d job(s) wait and no worker has room for a default agent; they start as capacity frees. Add a worker or lower estimates if this persists.", st.Queued))
+	}
+	if n := st.Jobs["lost"]; n > 0 {
+		out = append(out, fmt.Sprintf("%d job(s) are lost; cluster_explain shows the reason for each, and unretried ones can be resubmitted.", n))
+	}
+	return out
 }
 
 // roomFor counts how many copies of job fit on w one after another, each
@@ -422,6 +486,7 @@ func roomFor(w placement.Worker, job placement.Job) int {
 		n++
 		w.PendingMemoryMB += job.MemoryMB
 		w.CommittedCPU += job.CPU
+		w.PendingCPU += job.CPU
 		w.ActiveAgents++
 	}
 	return n

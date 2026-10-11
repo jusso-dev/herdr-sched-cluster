@@ -130,3 +130,39 @@ func TestProcessInfo(t *testing.T) {
 		t.Fatal(pi, err)
 	}
 }
+
+// Herdr 0.9.3 takes the pane as --pane; a bare pane id is refused with
+// "unknown option".
+func TestProcessInfoPassesThePaneAsAFlag(t *testing.T) {
+	c, log := fake(t, `{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":1}}}`, "", 0)
+	if _, err := c.ProcessInfo(ctx, "mini", "w1:p1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--machine", "mini", "pane", "process-info", "--pane", "w1:p1"}
+	if got := argvOf(t, log); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("argv %q", got)
+	}
+}
+
+// The answers below are copied from real Herdr 0.9.3.
+func TestWorkspaceListAndWorktreeRemove(t *testing.T) {
+	c, _ := fake(t, `{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[{"label":"hsc-j2","workspace_id":"w3","worktree":{"checkout_path":"/home/box/.herdr/worktrees/hz-repo/hsc-j2","is_linked_worktree":true}}]}}`, "", 0)
+	ws, err := c.WorkspaceList(ctx, "")
+	if err != nil || len(ws) != 1 || ws[0].ID != "w3" || ws[0].Label != "hsc-j2" || ws[0].Worktree == nil || !ws[0].Worktree.IsLinked {
+		t.Fatal(ws, err)
+	}
+	c, log := fake(t, "", `{"error":{"code":"dirty_worktree_requires_force","message":"fatal: '/x' contains modified or untracked files, use --force to delete it"},"id":"cli:worktree:remove"}`, 1)
+	err = c.WorktreeRemove(ctx, "mini", "w3", false)
+	if Code(err) != "dirty_worktree_requires_force" {
+		t.Fatal(err)
+	}
+	want := []string{"--machine", "mini", "worktree", "remove", "--workspace", "w3"}
+	if got := argvOf(t, log); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("argv %q", got)
+	}
+	c, _ = fake(t, "", `{"error":{"code":"worktree_create_failed","message":"fatal: invalid reference: HEAD"},"id":"cli:worktree:create"}`, 1)
+	_, err = c.WorktreeCreate(ctx, "", "/tmp/empty", "hsc/j1", "hsc-j1")
+	if err == nil || !strings.Contains(err.Error(), "invalid reference: HEAD") {
+		t.Fatal(err)
+	}
+}

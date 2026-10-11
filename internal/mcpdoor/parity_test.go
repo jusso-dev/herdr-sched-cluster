@@ -28,15 +28,18 @@ import (
 // removing one is a deliberate change to a surface other harnesses call: it
 // moves this list in the same commit, and it is a breaking change.
 var pinnedTools = []string{
+	"cluster_attach",
 	"cluster_cancel",
 	"cluster_detach",
 	"cluster_drain",
+	"cluster_estimates",
 	"cluster_events",
 	"cluster_explain",
 	"cluster_jobs",
 	"cluster_metrics",
 	"cluster_plan",
 	"cluster_queue",
+	"cluster_reregister",
 	"cluster_status",
 	"cluster_submit",
 	"cluster_undrain",

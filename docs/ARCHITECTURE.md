@@ -54,9 +54,10 @@ cluster exists.
 | `cluster/resource` | collectors are not | `Snapshot` type, Linux and macOS collectors behind build tags, the static backend for Windows, per-process sampling for given PIDs |
 | `cluster/placement` | yes | Hard constraints, scoring, policies, the human-readable explanation |
 | `cluster/queue` | yes | Ordering with priority ageing, backfill, the starvation guard |
-| `cluster/ledger` | no (SQLite) | Jobs, reservations, decisions, history and events. Owns every state transition, each in one transaction. |
+| `cluster/ledger` | no (SQLite, schema v2) | Jobs, reservations, decisions, run history (`runs`, `job_samples`), worker identities, intents and events. Owns every state transition, each in one transaction. |
 | `cluster/herdrx` | no (exec) | Typed adapter over the `herdr` CLI with the `--machine` prefix |
-| `cluster/transport` | no (exec) | Runs the remote probe over OpenSSH with a fixed argv |
+| `cluster/transport` | no (exec) | Runs the remote probe and remote Git operations over OpenSSH with a fixed, quoted argv |
+| `cluster/gitop` | no (exec) | The only Git the scheduler runs itself: clone into a missing path and delete a merged `hsc/` branch, as typed requests (`hsched cluster gitop`) |
 | `cluster/coord` | no | Ties it together: refresh workers, submit, pump, dispatch, reconcile, drain |
 | `cluster/sim` | test only | Simulated cluster: fake machines with set resources, a fake Herdr and a fake probe, a controllable clock |
 
@@ -75,7 +76,11 @@ tested directly and with property-based tests.
                                           +--> failed (attempts used up, or the outcome of an
                                                        agent start is unknown and no agent is found)
  queued/reserved --> cancelled
- (lost is reserved in the schema; v1 records an agent that vanished as finished, see Restarts)
+ running --> lost (herdr_restarted, session_vanished, worker_unreachable)
+ lost --> running (worker_unreachable and the agent is seen again)
+ lost --> queued (restartable, cluster_retry_lost, the pane is idle)
+ running --> failed or queued (disposable, terminated under sustained pressure)
+ queued --> failed (a dependency failed, or the repository has no commits)
 ```
 
 1. **Submit.** The request is validated and stored as `queued`. The
@@ -98,11 +103,19 @@ tested directly and with property-based tests.
    prompt. Herdr refuses a second live agent with the same name, which is a
    second, independent guard against double dispatch.
 5. **Running.** Each tick, the coordinator lists agents on every worker with
-   running jobs. A job whose agent has gone is `finished` and its reservation
-   is released. A worker that cannot be reached leaves its jobs `running`
-   with a `disconnected` flag: the agents are probably still working, so the
-   memory stays reserved.
-6. **Failure.** A failed dispatch releases the reservation, closes the
+   running jobs. When a job's agent has gone, `herdr pane process-info` on
+   its pane decides: the same shell means the agent exited (`finished`), a
+   new shell means Herdr restarted (`lost`, `herdr_restarted`), and no pane
+   means the session vanished (`lost`, `session_vanished`). A worker that
+   cannot be reached leaves its jobs `running` with a `disconnected` flag and
+   their memory reserved, until `cluster_lost_after_seconds`, when they
+   become `lost` with `worker_unreachable`; such a job is taken back as
+   running if its agent is seen again.
+6. **Cleanup.** A job that ended with a scheduler-made worktree is handled
+   by `cluster_worktree_retention`: `herdr worktree remove` (never forced
+   unless `cluster_worktree_remove_dirty`), then `workspace close`, then
+   optionally `git branch -d` through `hsched cluster gitop`.
+7. **Failure.** A failed dispatch releases the reservation, closes the
    half-made workspace if there is one, marks the worker as backing off, and
    requeues the job until `max_attempts` is reached.
 
@@ -126,6 +139,14 @@ which ones failed.
 - on battery below `min_battery_percent`, when the worker is set to care
 - thermal state `critical`
 - the job is pinned to a different machine
+- Herdr's own `machine status` says its server is unreachable, or the
+  worker's identity changed since it was registered (`incompatible`)
+- CPU utilisation plus the job's CPU above `max_cpu_utilisation_percent`
+- swap-out rate above `max_swap_pressure`
+- memory below `memory_reserve_percent` of total after the job
+- another job is in the same repository there and the job cannot have a
+  worktree, or `cluster_max_agents_per_repo` is reached
+- the repository is missing and there is no `clone_url`
 
 ### Score (only among eligible workers)
 
@@ -184,8 +205,10 @@ it. A queued job explains why it is still waiting.
   PIDs), it samples their resident memory and CPU. If an agent uses more than
   it reserved, its reservation is raised to what it uses plus
   `cluster_overrun_margin_pct` (default 20%), and a `cluster.job.overrun` event is written. Nothing is killed.
-- Peak usage is remembered per agent kind and repository and used as the
-  default estimate for the next job of the same shape (exponentially weighted).
+- Every run's peak and typical memory and its CPU are stored in `runs`. The
+  estimate for the next job of the same kind and repository (then kind
+  alone) is the `cluster_history_percentile` of the last
+  `cluster_history_window` runs, nearest rank, plus headroom.
 
 ## Draining
 
@@ -199,14 +222,15 @@ are still running there. `hsched cluster undrain` reverses it.
   `dispatching` are checked against Herdr on each tick: if the agent
   `hsc-<id>` exists, the job becomes `running`. If not, nothing is decided
   until `cluster_dispatch_grace_seconds` has passed since the job last moved.
-  Then a job that never reached the agent start is requeued, and a job that
-  may have reached it is failed rather than retried (at most once: the agent
-  may already have run and exited). Running jobs are reconciled on the first
-  tick.
-- **Worker Herdr restart:** agents on that worker are gone (see the gap
-  analysis). Reconciliation sees them missing from `agent list`, records the
-  jobs as finished and frees the capacity. Telling this apart from a normal
-  exit (`lost`) is a known gap.
+  Then a job with no recorded start intent is requeued after any workspace
+  it half-made (found by its label in `workspace list`) is closed, and a job
+  with a start intent fails with `dispatch_interrupted` rather than being
+  retried (at most once: the agent may already have run). Running jobs are
+  reconciled on the first tick.
+- **Worker Herdr restart:** agents on that worker are gone. Reconciliation
+  sees a new shell in the pane and records the jobs as `lost`
+  (`herdr_restarted`), never `finished`, and frees the capacity. Only a
+  `--restartable` job is started again.
 - **Worker disconnect:** jobs stay `running` and keep their reservations, and
   the worker is not eligible for new work until it answers again.
 

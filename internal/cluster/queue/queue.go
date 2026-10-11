@@ -83,6 +83,19 @@ type Plan struct {
 func Pass(entries []Entry, workers []placement.Worker, now time.Time, cfg Config, held map[string]string) Plan {
 	ws := make([]placement.Worker, len(workers))
 	copy(ws, workers)
+	// The cluster-wide repository counts are one map shared by every
+	// worker, so an assignment anywhere is seen by every later job.
+	cluster := map[string]int{}
+	for _, w := range workers {
+		for k, v := range w.ClusterRepos {
+			if v > cluster[k] {
+				cluster[k] = v
+			}
+		}
+	}
+	for i := range ws {
+		ws[i].ClusterRepos = cluster
+	}
 	for i := range ws {
 		if ws[i].RunningRepos != nil {
 			m := make(map[string]int, len(ws[i].RunningRepos))
@@ -131,6 +144,7 @@ func Pass(entries []Entry, workers []placement.Worker, now time.Time, cfg Config
 			}
 			ws[i].PendingMemoryMB += e.Job.MemoryMB
 			ws[i].CommittedCPU += e.Job.CPU
+			ws[i].PendingCPU += e.Job.CPU
 			ws[i].ActiveAgents++
 			if e.Job.Repo != "" {
 				if ws[i].RunningRepos == nil {
@@ -138,6 +152,9 @@ func Pass(entries []Entry, workers []placement.Worker, now time.Time, cfg Config
 				}
 				ws[i].RunningRepos[e.Job.Repo]++
 			}
+		}
+		if e.Job.Repo != "" {
+			cluster[e.Job.Repo]++
 		}
 		for w, j := range plan.Holds {
 			if j == e.Job.ID {
