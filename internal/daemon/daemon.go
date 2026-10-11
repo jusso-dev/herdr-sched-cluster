@@ -93,6 +93,8 @@ type Daemon struct {
 	writingTrigger sync.Mutex
 	// inbound is the webhook door as doctor reports it.
 	inbound inbound
+	// Cluster is the distributed agent scheduler, nil when it is off.
+	Cluster *Cluster
 }
 
 // Lock takes the one-daemon lock, and holds it for as long as the returned
@@ -175,6 +177,16 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
 		defer close(ticking)
 		d.tick(ctx)
 	}()
+	clustering := make(chan struct{})
+	go func() {
+		defer close(clustering)
+		d.clusterTick(ctx)
+	}()
+	metrics := make(chan struct{})
+	go func() {
+		defer close(metrics)
+		d.serveMetrics(ctx)
+	}()
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -196,6 +208,8 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
 				default:
 				}
 				<-ticking
+				<-clustering
+				<-metrics
 				<-serving
 				d.Cleanup(ln)
 				return nil
@@ -369,6 +383,9 @@ func (d *Daemon) serve(ctx context.Context, v verbs.Verb, req protocol.Request) 
 		return encode(d.listParked(req))
 	case "parked.resolve":
 		return encode(d.resolveParked(ctx, req))
+	case "cluster.workers", "cluster.submit", "cluster.jobs", "cluster.explain", "cluster.cancel",
+		"cluster.detach", "cluster.drain", "cluster.undrain", "cluster.events", "cluster.metrics":
+		return d.serveCluster(ctx, v.Name, req)
 	case "stop":
 		if d.halt == nil {
 			return nil, codes.Refusef(codes.NotRunning, "this daemon is not serving")

@@ -185,6 +185,10 @@ type Config struct {
 	// inbound door at all, which is what a fleet with only file watchers
 	// wants: a port nothing uses is a port worth not opening.
 	WebhookAddr string `json:"webhook_addr"`
+	// Cluster holds the cluster_* keys as written, each already checked
+	// against its kind. internal/cluster/clusterconf turns them into the
+	// coordinator's configuration.
+	Cluster map[string]string `json:"cluster,omitempty"`
 	// Path is where this came from, for doctor.
 	Path string `json:"path"`
 	// Present says whether the file existed at all.
@@ -194,7 +198,74 @@ type Config struct {
 // Keys is every key the config document accepts, in the order the README
 // lists them. A test reads one against the other, so a key added here without
 // a line in Configuration is a failing test rather than an undocumented knob.
-var Keys = []string{"tick_seconds", "gate_command", "on_event", "webhook_addr"}
+var Keys = append([]string{"tick_seconds", "gate_command", "on_event", "webhook_addr"}, ClusterKeys...)
+
+// ClusterKind is the kind of value each cluster_* key takes.
+var ClusterKind = map[string]string{
+	"cluster_enabled":                  "bool",
+	"cluster_tick_seconds":             "int",
+	"cluster_policy":                   "string",
+	"cluster_include_local":            "bool",
+	"cluster_isolation":                "string",
+	"cluster_probe_program":            "string",
+	"cluster_probe_ttl_seconds":        "int",
+	"cluster_probe_timeout_seconds":    "int",
+	"cluster_dispatch_timeout_seconds": "int",
+	"cluster_dispatch_grace_seconds":   "int",
+	"cluster_max_attempts":             "int",
+	"cluster_default_memory_mb":        "int",
+	"cluster_default_cpu":              "float",
+	"cluster_overrun_margin_pct":       "float",
+	"cluster_history_headroom_pct":     "float",
+	"cluster_ageing_minutes":           "int",
+	"cluster_starvation_minutes":       "int",
+	"cluster_min_free_memory_mb":       "int",
+	"cluster_max_cpu_commit":           "float",
+	"cluster_max_load_per_core":        "float",
+	"cluster_min_free_disk_gb":         "float",
+	"cluster_min_battery_pct":          "int",
+	"cluster_max_agents":               "int",
+	"cluster_workers_file":             "string",
+	"cluster_metrics_addr":             "string",
+}
+
+// ClusterKeys is the cluster keys in the order the README lists them.
+var ClusterKeys = []string{
+	"cluster_enabled", "cluster_tick_seconds", "cluster_policy", "cluster_include_local", "cluster_isolation",
+	"cluster_probe_program", "cluster_probe_ttl_seconds", "cluster_probe_timeout_seconds",
+	"cluster_dispatch_timeout_seconds", "cluster_dispatch_grace_seconds", "cluster_max_attempts",
+	"cluster_default_memory_mb", "cluster_default_cpu", "cluster_overrun_margin_pct", "cluster_history_headroom_pct",
+	"cluster_ageing_minutes", "cluster_starvation_minutes",
+	"cluster_min_free_memory_mb", "cluster_max_cpu_commit", "cluster_max_load_per_core", "cluster_min_free_disk_gb",
+	"cluster_min_battery_pct", "cluster_max_agents", "cluster_workers_file", "cluster_metrics_addr",
+}
+
+func applyCluster(c *Config, key string, v value) error {
+	kind := ClusterKind[key]
+	raw := strings.TrimSpace(v.scalar)
+	if v.isList && raw == "" {
+		return fmt.Errorf("%s takes one %s, got a list", key, kind)
+	}
+	switch kind {
+	case "bool":
+		if _, err := strconv.ParseBool(raw); err != nil {
+			return fmt.Errorf("%s must be true or false, got %q", key, raw)
+		}
+	case "int":
+		if _, err := strconv.ParseInt(raw, 10, 64); err != nil {
+			return fmt.Errorf("%s must be a whole number, got %q", key, raw)
+		}
+	case "float":
+		if _, err := strconv.ParseFloat(raw, 64); err != nil {
+			return fmt.Errorf("%s must be a number, got %q", key, raw)
+		}
+	}
+	if c.Cluster == nil {
+		c.Cluster = map[string]string{}
+	}
+	c.Cluster[key] = raw
+	return nil
+}
 
 // Load reads the config file, applies defaults, then applies SCHED_ overrides.
 // A missing file is the unconfigured default; a malformed one is an error,
@@ -266,6 +337,9 @@ func (c *Config) apply(key string, v value) error {
 		}
 		c.WebhookAddr = strings.TrimSpace(v.scalar)
 	default:
+		if _, ok := ClusterKind[key]; ok {
+			return applyCluster(c, key, v)
+		}
 		return fmt.Errorf("unknown key %q", key)
 	}
 	return nil

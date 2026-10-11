@@ -302,6 +302,141 @@ var All = []Verb{
 		Mutates:     true,
 		Gated:       "sched.stop",
 	},
+	{
+		Name: "cluster.workers", MCP: "cluster_workers", CLI: []string{"cluster", "workers"},
+		Short: "List the machines the cluster can place agents on, with their resources",
+		Long: "Every worker: this computer (unless cluster_include_local is false) and " +
+			"every enabled machine saved with `herdr machine add`. For each it gives the " +
+			"state (ready, draining, disabled, unreachable, auth_required, incompatible, " +
+			"backoff), the latest resource reading (memory available and pressure, swap, " +
+			"CPU use and load, disk, power, thermal state, agents found on PATH), what " +
+			"the scheduler has reserved there, and the last probe error. Readings are " +
+			"cached for cluster_probe_ttl_seconds unless refresh is set.",
+		Args: []Arg{
+			{Name: "refresh", Type: Bool, Desc: "Probe every worker now instead of using a cached reading"},
+		},
+	},
+	{
+		Name: "cluster.submit", MCP: "cluster_submit", CLI: []string{"cluster", "submit"},
+		Short: "Queue a coding agent to run on whichever machine suits it",
+		Long: "Queues one agent of the given kind in the given repository, with an " +
+			"optional first prompt. The scheduler places it on the best worker that " +
+			"passes every hard constraint (memory kept free, pressure not critical, " +
+			"CPU commitment, load, disk, battery, thermal, max agents, pin, labels, " +
+			"OS, architecture, repository present, declared agents), opens a Herdr " +
+			"workspace there (a worktree when the repository is already busy on that " +
+			"worker), and starts the agent with `herdr agent start`. Without memory_mb " +
+			"the estimate comes from what earlier agents of this kind used in this " +
+			"repository, else cluster_default_memory_mb. A job no worker could ever run " +
+			"is refused here with the reason for each worker.",
+		Args: []Arg{
+			{Name: "kind", Type: String, Desc: "Agent kind as Herdr names it: claude, codex, cursor, gemini, opencode, amp, droid, kiro, qwen, pi, and so on", Required: true, Positional: true},
+			{Name: "repo", Type: String, Desc: "Repository directory on the worker, absolute or starting with ~/", Required: true, Positional: true},
+			{Name: "prompt", Type: String, Desc: "First prompt sent to the agent once it is up"},
+			{Name: "memory_mb", Type: Int, Desc: "Memory to reserve in MB; omit to use the learned estimate"},
+			{Name: "cpu", Type: String, Desc: "CPU cores to reserve, for example 1 or 1.5; default cluster_default_cpu"},
+			{Name: "priority", Type: Int, Desc: "-100 to 100; higher goes first, and waiting jobs gain priority with age"},
+			{Name: "policy", Type: String, Desc: "balanced, memory, performance, pack, spread or local-first"},
+			{Name: "machine", Type: String, Desc: "Pin to one worker by id or label"},
+			{Name: "labels", Type: String, Desc: "Comma-separated labels the worker must carry"},
+			{Name: "os", Type: String, Desc: "Required worker OS: darwin, linux or windows"},
+			{Name: "arch", Type: String, Desc: "Required worker architecture: arm64 or amd64"},
+			{Name: "isolation", Type: String, Desc: "auto (worktree when the repo is busy there), worktree, or none"},
+			{Name: "agent_args", Type: String, Desc: "Extra arguments for the agent, space-separated; each limited to letters, digits and ._/:=,@+%-"},
+		},
+		Mutates: true,
+		Gated:   "sched.cluster.submit",
+	},
+	{
+		Name: "cluster.jobs", MCP: "cluster_jobs", CLI: []string{"cluster", "jobs"},
+		Short: "List cluster jobs and where they run",
+		Long: "Cluster jobs, newest first: state (queued, reserved, dispatching, running, " +
+			"finished, failed, cancelled, lost, detached), worker, agent name, workspace " +
+			"and pane, memory reserved and observed, and the last error. The prompt " +
+			"itself is never shown or stored in the event trail; only its length and " +
+			"SHA-256 are.",
+		Args: []Arg{
+			{Name: "state", Type: String, Desc: "Comma-separated states to show; default all"},
+			{Name: "limit", Type: Int, Desc: "Show at most this many"},
+		},
+	},
+	{
+		Name: "cluster.explain", MCP: "cluster_explain", CLI: []string{"cluster", "explain"},
+		Short: "Explain why a job was placed where it was, or why it is waiting",
+		Long: "Every placement decision recorded for the job, with each worker's " +
+			"eligibility, the reasons it was ruled out, its score and the factors " +
+			"behind the score. For a queued job it also places the job again against " +
+			"the current readings, without dispatching, so the answer is up to date.",
+		Args: []Arg{
+			{Name: "id", Type: String, Desc: "The job id, for example j12", Required: true, Positional: true},
+		},
+	},
+	{
+		Name: "cluster.cancel", MCP: "cluster_cancel", CLI: []string{"cluster", "cancel"},
+		Short: "Cancel a job that has not started",
+		Long: "Cancels a queued or reserved job and releases its capacity. A running " +
+			"job is refused: the scheduler never stops an agent. Close it in Herdr, " +
+			"or use cluster detach to stop tracking it.",
+		Args: []Arg{
+			{Name: "id", Type: String, Desc: "The job id", Required: true, Positional: true},
+		},
+		Mutates: true,
+		Gated:   "sched.cluster.cancel",
+	},
+	{
+		Name: "cluster.detach", MCP: "cluster_detach", CLI: []string{"cluster", "detach"},
+		Short: "Stop tracking a running job and release its reservation",
+		Long: "Marks a running job detached and releases what it reserved. The agent " +
+			"itself is left running in Herdr; only the scheduler forgets it. Use it " +
+			"when an agent is being kept for interactive work and should no longer " +
+			"count against the worker's capacity.",
+		Args: []Arg{
+			{Name: "id", Type: String, Desc: "The job id", Required: true, Positional: true},
+		},
+		Mutates: true,
+		Gated:   "sched.cluster.detach",
+	},
+	{
+		Name: "cluster.drain", MCP: "cluster_drain", CLI: []string{"cluster", "drain"},
+		Short: "Stop placing new agents on a worker",
+		Long: "A draining worker takes no new jobs. Agents already running there " +
+			"carry on and are still tracked. Jobs pinned to it wait. Undo with " +
+			"cluster undrain.",
+		Args: []Arg{
+			{Name: "worker", Type: String, Desc: "Worker id or label", Required: true, Positional: true},
+		},
+		Mutates: true,
+		Gated:   "sched.cluster.drain",
+	},
+	{
+		Name: "cluster.undrain", MCP: "cluster_undrain", CLI: []string{"cluster", "undrain"},
+		Short: "Let a drained worker take new agents again",
+		Long:  "Reverses cluster drain.",
+		Args: []Arg{
+			{Name: "worker", Type: String, Desc: "Worker id or label", Required: true, Positional: true},
+		},
+		Mutates: true,
+		Gated:   "sched.cluster.undrain",
+	},
+	{
+		Name: "cluster.events", MCP: "cluster_events", CLI: []string{"cluster", "events"},
+		Short: "Read the cluster's own event trail",
+		Long: "Reservations, dispatches, failures, adoptions after a restart, " +
+			"disconnects, overruns, drains and probe failures, oldest first. Pass " +
+			"since with the last id seen to resume.",
+		Args: []Arg{
+			{Name: "since", Type: Int, Desc: "Return events after this id"},
+			{Name: "limit", Type: Int, Desc: "Return at most this many"},
+		},
+	},
+	{
+		Name: "cluster.metrics", MCP: "cluster_metrics", CLI: []string{"cluster", "metrics"},
+		Short: "Print cluster metrics in Prometheus text format",
+		Long: "Per-worker memory, pressure, CPU, load, reserved memory and agent counts, " +
+			"and job counts by state, in the Prometheus text exposition format. The " +
+			"same text is served on cluster_metrics_addr when that is set to a " +
+			"loopback address. Nothing is sent anywhere.",
+	},
 }
 
 // ByName finds the verb a socket request names.

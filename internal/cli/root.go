@@ -119,6 +119,8 @@ func groupShort(name string) string {
 		return "Work with the schedules that fire on a cron expression"
 	case "trigger":
 		return "Work with the inbound webhooks and file watchers"
+	case "cluster":
+		return "Place coding agents across the machines saved in Herdr"
 	}
 	return name
 }

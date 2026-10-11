@@ -1,10 +1,33 @@
 # Changelog
 
-All notable changes to herdr-sched are recorded here. The format follows
+All notable changes to herdr-sched-cluster, and before it to herdr-sched, are
+recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-10-11
+
+First release of herdr-sched-cluster, a derivative of herdr-sched 0.2.4.
+
+- Cluster scheduler: queue coding agents with `hsched cluster submit` and have
+  them placed on the best of this computer and the machines saved in Herdr,
+  by live memory, pressure, CPU, load, disk, power and thermal readings.
+- Resource probe `hsched cluster probe` for Linux (procfs, PSI) and macOS
+  (sysctl, ps, pmset; untested on hardware), and static capacity for
+  Windows workers.
+- SQLite ledger (`cluster.db`, `0600`) with atomic reservations, guarded state
+  transitions, history-based memory estimates and an event trail.
+- Queue with priority ageing, backfill and a starvation guard.
+- Dispatch through `herdr --machine`: workspace or worktree, `agent start`,
+  `agent prompt`, with reconciliation, restart recovery, disconnect handling,
+  draining and overrun handling that never kills an agent.
+- Cluster verbs on both doors: `cluster workers`, `submit`, `jobs`,
+  `explain`, `cancel`, `detach`, `drain`, `undrain`, `events`, `metrics`.
+- Prometheus text metrics, optionally on a loopback address.
+- Dashboard popup shows cluster workers and jobs.
+- Minimum Herdr version is now 0.9.2.
 
 ## [0.2.4] - 2026-08-30
 

@@ -242,6 +242,9 @@ func Write(verb string, result json.RawMessage, asJSON bool, out io.Writer) erro
 			fmt.Fprintln(out, string(res.Result))
 		}
 	default:
+		if strings.HasPrefix(verb, "cluster.") {
+			return writeCluster(verb, result, out)
+		}
 		_, err := fmt.Fprintln(out, string(result))
 		return err
 	}

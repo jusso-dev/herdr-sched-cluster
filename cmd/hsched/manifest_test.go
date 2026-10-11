@@ -137,7 +137,7 @@ func TestTheREADMEIsInTheStandardShape(t *testing.T) {
 		t.Error("how the verbs are reached on both doors is not answered before Configuration")
 	}
 	for what, want := range map[string]string{
-		"the install command":  "herdr plugin install husniadil/herdr-sched",
+		"the install command":  "herdr plugin install jusso-dev/herdr-sched-cluster",
 		"the skill symlink":    "skills/sched",
 		"the checkout variant": "herdr plugin link .",
 		"the licence":          "MIT",

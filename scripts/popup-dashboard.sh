@@ -1,6 +1,6 @@
 #!/bin/sh
-# The read-only dashboard: every schedule, every trigger and the tail of the
-# run trail, rendered from the CLI's own `--json` and redrawn every 30
+# The read-only dashboard: the cluster's workers and agent jobs, every
+# schedule, every trigger and the tail of the run trail, rendered from the CLI's own `--json` and redrawn every 30
 # seconds. `r` redraws now; `q` or Esc quits. Keys are read raw (one
 # character, no Enter) where stty allows it.
 #
@@ -194,6 +194,17 @@ render_runs() {
       end'
 }
 
+# The cluster sections print the CLI's own human answer, which already says
+# when the daemon refused (for example with the cluster scheduler off). Both
+# verbs only read.
+render_cluster_workers() {
+  "$HSCHED" cluster workers 2>&1 | sed 's/^/  /'
+}
+
+render_cluster_jobs() {
+  "$HSCHED" cluster jobs --limit 12 2>&1 | sed 's/^/  /'
+}
+
 while :; do
   printf '\033[2J\033[H'
   # The clock this frame was drawn at rather than "Ns ago": the screen is
@@ -202,6 +213,10 @@ while :; do
   printf '\033[1mhsched dashboard\033[0m   refreshed %s · every 30s · r refresh · q quit\n' \
     "$(date -u '+%H:%M:%SZ')"
 
+  section "CLUSTER WORKERS"
+  render_cluster_workers
+  section "CLUSTER JOBS (newest 12)"
+  render_cluster_jobs
   section "JOBS"
   render_jobs
   section "TRIGGERS"

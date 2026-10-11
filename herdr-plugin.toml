@@ -1,8 +1,8 @@
 id = "herdr-sched"
 name = "Sched"
-version = "0.2.4"
-min_herdr_version = "0.8.0"
-description = "The scheduler and trigger plugin for a Herdr fleet: a cron schedule or an inbound trigger fires an action into the sibling plugins"
+version = "0.3.0"
+min_herdr_version = "0.9.2"
+description = "Resource-aware placement of coding agents across the machines saved in Herdr, plus the herdr-sched cron and trigger scheduler"
 platforms = ["macos", "linux"]
 
 # One statically linked Go binary is the daemon and both doors. Compiling on
@@ -65,7 +65,7 @@ command = ["./scripts/on-pane-gone.sh"]
 [[panes]]
 id = "dashboard"
 title = "Sched dashboard"
-description = "Every schedule, every trigger and the tail of the run trail"
+description = "Cluster workers and jobs, every schedule, every trigger and the tail of the run trail"
 placement = "popup"
 width = "90%"
 height = "80%"

@@ -1,47 +1,67 @@
 # herdr-sched-cluster
 
-> Work in progress. This repository extends
-> [herdr-sched](https://github.com/husniadil/herdr-sched) by Husni Adil Makmur
-> (MIT) with a resource-aware scheduler that places coding agents across
-> several machines running Herdr. Start with
-> [docs/GAP-ANALYSIS.md](docs/GAP-ANALYSIS.md) and
-> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The upstream README follows
-> unchanged until the cluster work is documented here.
+herdr-sched-cluster lets you launch coding agents in Herdr without choosing
+which computer they run on. You queue an agent (Claude Code, Codex, Cursor,
+Gemini and the other kinds Herdr knows) with a repository and a prompt, and
+the scheduler places it on whichever of your machines has the memory and CPU
+to spare, opens a Herdr workspace there and starts the agent. It reads real
+memory pressure, swap, CPU, load, disk, battery and thermal state on each
+machine, keeps a reservation for every agent it starts, never starts the same
+job twice, and can tell you why a job went where it did or why it is waiting.
 
-# herdr-sched
+It is an extension of [herdr-sched](https://github.com/husniadil/herdr-sched)
+by Husni Adil Makmur, used under the MIT licence, and it keeps everything
+herdr-sched does: cron jobs and triggers that fire actions into the sibling
+plugins. Machines are the ones you have already saved with
+`herdr machine add`; this plugin never manages SSH keys or Herdr sessions
+itself. There is no Kubernetes, Docker, Redis or database server: one Go
+binary, `hsched`, plus a SQLite file.
 
-herdr-sched is the scheduler and trigger plugin for a Herdr fleet. A cron
-schedule or an inbound trigger fires an action into the sibling plugins —
-create a task on the htask board, send or ask over hmail, dispatch a worker
-through hdis, run a shell command — as the principal the shared plugin
-contract already names for it: `cron:<job id>` or `trigger:<id>` (§3.1), so
-the actor is on every event trail the action touches. One binary, `hsched`, is
-the daemon and both doors.
-
-**Both halves are here.** A job fires on a schedule; a trigger fires on an
-inbound webhook request or on a watched file changing. Beside them is the
-skeleton every sibling shares — one verb registry both doors are generated
-from, the four contract globals, the socket protocol, the daemon with its lock
-and its tick, the JSON store with an events trail per entity, the config
-document, the policy gate, and the test harness. The verbs are `job add`,
-`job list`, `job remove`, `job enable`, `job disable`, `trigger add`,
-`trigger list`, `trigger remove`, `trigger enable`, `trigger disable`,
-`doctor`, `dump`, `events`, `parked list`, `parked resolve` and `stop`.
+The design and its trade-offs are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+what was reused and what was missing in Herdr is in
+[docs/GAP-ANALYSIS.md](docs/GAP-ANALYSIS.md), and what is built and tested is
+in [docs/IMPLEMENTATION-CHECKLIST.md](docs/IMPLEMENTATION-CHECKLIST.md).
 
 ## Install
 
+You need Herdr 0.9.2 or later on every machine, Go 1.26 or later where the
+plugin is built, and key-based SSH from the coordinator (the machine you
+submit from) to each worker.
+
+On every machine, coordinator and workers alike:
+
 ```sh
-herdr plugin install husniadil/herdr-sched
+herdr plugin install jusso-dev/herdr-sched-cluster
 ```
 
 Herdr runs the manifest's `[[build]]` step, which compiles `./cmd/hsched` into
-`./bin/hsched` inside the installed plugin directory — the repository ships no
-release artefact, and Go's build cache makes the second install fast. The
-`[[startup]]` step then runs `./scripts/start.sh`, which brings the daemon up
-detached and exits, which is what Herdr expects of a startup command (§2.4).
+`./bin/hsched` inside the installed plugin directory. The `[[startup]]` step
+runs `./scripts/start.sh`, which brings the daemon up detached. The plugin id
+is still `herdr-sched` and the binary is still `hsched`, so this replaces the
+upstream plugin rather than sitting beside it: if you have upstream
+herdr-sched installed, run `herdr plugin uninstall herdr-sched` first. Your
+existing cron jobs and triggers are kept, because the store format is
+unchanged.
+
+The coordinator probes each worker by running `hsched cluster probe --json`
+over SSH. A non-interactive SSH session usually has a short `PATH`
+(`/usr/bin:/bin:/usr/sbin:/sbin` on macOS), so on each worker put the binary
+somewhere fixed:
+
+```sh
+mkdir -p ~/.local/bin
+ln -sf "$(herdr plugin root herdr-sched)/bin/hsched" ~/.local/bin/hsched
+```
+
+and on the coordinator tell the scheduler where that is, in
+`~/.config/sched/sched.toml`:
+
+```toml
+cluster_probe_program = "~/.local/bin/hsched"
+```
 
 The **skill symlink is not placed for you**. Ask Herdr for the plugin root
-rather than writing the hashed path out by hand, and link the skill from there:
+and link the skill from there:
 
 ```sh
 ln -s "$(herdr plugin root herdr-sched)/skills/sched" ~/.claude/skills/sched
@@ -50,7 +70,8 @@ ln -s "$(herdr plugin root herdr-sched)/skills/sched" ~/.claude/skills/sched
 To develop against a checkout instead of an installed copy:
 
 ```sh
-cd herdr-sched
+git clone https://github.com/jusso-dev/herdr-sched-cluster
+cd herdr-sched-cluster
 herdr plugin link .
 ```
 
@@ -58,8 +79,127 @@ Herdr has no shutdown hook, so disabling or unlinking the plugin leaves the
 daemon running. The `[[actions]]` entries are how it is actually turned off:
 **Stop the sched daemon** and **Restart the sched daemon**, both on the
 workspace context, running `./scripts/stop.sh` and `./scripts/restart.sh`.
+Configuration is read once at daemon start, so restart after editing it.
 
-## The two doors
+### Upgrading
+
+`herdr plugin install jusso-dev/herdr-sched-cluster` again (or `git pull` in a
+linked checkout), then restart the daemon. The cluster ledger carries a
+schema version and is refused, not overwritten, by a binary that does not
+know it.
+
+## Registering machines
+
+Workers are Herdr's saved machines. On the coordinator:
+
+```sh
+herdr machine add mini            # follow Herdr's prompts for the SSH target
+herdr machine status              # every saved machine should be reachable
+herdr --machine mini agent list   # Herdr itself can drive the remote server
+hsched cluster probe              # this machine's own reading
+hsched cluster workers --refresh  # every worker as the scheduler sees it
+```
+
+`hsched cluster workers` lists this computer as `local` (unless
+`cluster_include_local = false`) and every enabled saved machine. A worker
+shows `unreachable` or `auth_required` with the SSH error when the probe
+fails, then `backoff` while it waits to retry. A machine you disable in Herdr
+shows `disabled`.
+
+A machine that cannot run the probe, such as a Windows machine, can still
+take agents if Herdr can drive it: declare its capacity in
+`~/.config/sched/cluster-workers.json` with `"probe": "static"`. It is then
+placed against that declared memory and core count and what the scheduler has
+reserved there, not against live readings.
+
+```json
+{
+  "local": { "max_agents": 6, "weight": 1.2 },
+  "mini": { "max_agents": 3, "min_free_memory_mb": 3072, "labels": ["arm"] },
+  "winbox": {
+    "probe": "static", "os": "windows", "arch": "amd64",
+    "memory_mb": 32768, "cores": 8, "agents": ["codex", "claude"]
+  }
+}
+```
+
+Keys are a Herdr machine id or label, or `local`. Per-worker fields are
+`probe` (`auto`, `static` or `off`), `program` (the remote `hsched` for this
+worker), `max_agents`, `min_free_memory_mb`, `max_cpu_commit`,
+`max_load_per_core`, `min_free_disk_gb`, `min_battery_pct`, `weight` (a
+preference, higher is preferred), `labels`, `agents` (when set, the only
+agent kinds this worker may run), and for static workers `os`, `arch`,
+`memory_mb` and `cores`. An unknown field is an error, so a typo cannot be
+silently ignored.
+
+## Running agents on the cluster
+
+```sh
+# Queue a Claude Code agent; the scheduler picks the machine.
+hsched cluster submit claude ~/src/app --prompt "Fix the failing date tests"
+
+# Reserve more memory, prefer memory headroom, and pin to the MacBook.
+hsched cluster submit codex ~/src/api --memory_mb 8192 --policy memory --machine mbp
+
+# Ask for a fresh Git worktree even when the repository is idle.
+hsched cluster submit claude ~/src/app --isolation worktree --prompt "Try the refactor"
+
+hsched cluster jobs               # what is queued, running and done, and where
+hsched cluster explain j12        # why j12 went where it did, or why it waits
+hsched cluster workers            # memory, pressure, CPU and reservations per machine
+hsched cluster drain mini         # no new agents on mini; running ones carry on
+hsched cluster undrain mini
+hsched cluster cancel j14         # a job that has not started yet
+hsched cluster detach j12         # stop counting a running agent; it keeps running
+hsched cluster events             # reservations, dispatches, failures, overruns
+hsched cluster metrics            # Prometheus text
+```
+
+The repository path is a path on the worker, absolute or starting with `~/`
+(resolved against that worker's home directory). Machines with the same
+layout under your home directory work without any mapping. A path that does
+not exist on a worker rules that worker out, and `explain` says so.
+
+`kind` is the agent kind as Herdr names it: `amp`, `claude`, `codex`,
+`copilot`, `cursor`, `droid`, `gemini`, `grok`, `kiro`, `opencode`, `pi`,
+`qwen` and the others Herdr detects.
+
+What happens to a job:
+
+1. `submit` checks the request and refuses a job no worker could ever run,
+   with the reason for each worker. Without `--memory_mb`, the estimate is
+   learned from earlier agents of the same kind in the same repository, then
+   the same kind anywhere, then `cluster_default_memory_mb`.
+2. Each pass orders the queue by priority plus ageing, and places each job on
+   the best eligible worker. Hard constraints always win over the score: a
+   worker is ruled out for memory below `min_free_memory_mb` after the job,
+   critical memory pressure, CPU over-commitment, load per core, low disk, low
+   battery, critical thermal state, `max_agents`, a pin, labels, OS or
+   architecture, a missing repository or a declared agent list. The score
+   then ranks what is left according to the policy (`balanced`, `memory`,
+   `performance`, `pack`, `spread` or `local-first`).
+3. Capacity is reserved in the SQLite ledger inside one transaction that
+   re-checks the worker's load, so two submissions racing for the last
+   gigabytes cannot both win.
+4. On the chosen machine the scheduler runs `herdr --machine <id> workspace
+   create` (or `worktree create` when another job already holds that
+   repository there), then `agent start hsc-<job>` and `agent prompt`.
+5. Every tick it reconciles with `herdr agent list` on each worker: a running
+   job whose agent has gone is finished, an unreachable worker marks its jobs
+   disconnected but keeps their reservations, and the agent's process tree is
+   measured. An agent using more than it reserved has its reservation raised
+   to what it uses plus `cluster_overrun_margin_pct`. Nothing is ever killed.
+
+A big job that keeps losing to smaller ones is protected: once it has waited
+`cluster_starvation_minutes`, the worker nearest to fitting it is held clear
+for it, and small jobs that would fit elsewhere still run.
+
+## Cron jobs, triggers and the two doors
+
+Everything below this point is upstream herdr-sched's behaviour, kept as it
+was, with the cluster verbs added to the same registry.
+
+### The two doors
 
 Every verb is on both doors, generated from one registry
 (`internal/verbs`), and a parity test enumerates both surfaces against it: a
@@ -88,11 +228,14 @@ Over MCP, wire in the same binary:
 hsched mcp
 ```
 
-It registers as `herdr-sched` and serves the verbs under their bare names —
+It registers as `herdr-sched` and serves the verbs under their bare names -
 `job_add`, `job_list`, `job_remove`, `job_enable`, `job_disable`,
 `trigger_add`, `trigger_list`, `trigger_remove`, `trigger_enable`,
 `trigger_disable`, `doctor`, `dump`, `events`, `parked_list`,
-`parked_resolve`, `stop` — so a
+`parked_resolve`, `stop`, and the cluster tools `cluster_workers`,
+`cluster_submit`, `cluster_jobs`, `cluster_explain`, `cluster_cancel`,
+`cluster_detach`, `cluster_drain`, `cluster_undrain`, `cluster_events` and
+`cluster_metrics`, so a
 caller reads them as herdr-sched's, not as names that repeat the binary. A
 dotted verb becomes an underscored tool name, and that name is a field on the
 verb rather than a transformation applied at the door.
@@ -110,7 +253,7 @@ hsched mcp --operator
 
 Every call that door makes is then the operator's: the §9 gate's subject, the
 actor on the event trail, and who resolved a parked action. Without it a
-paneless door's calls are `none` — written into the trail verbatim, so a row a
+paneless door's calls are `none`, written into the trail verbatim, so a row a
 door nobody declared created says so rather than being filed under the
 operator.
 
@@ -149,7 +292,7 @@ hsched mcp --project ~/src/herdr-sched
 ```
 
 It is a **default and not an override**: a tool call that passes `project`
-acts in the one it named, and `all_projects` is untouched — the door's project
+acts in the one it named, and `all_projects` is untouched, the door's project
 is not a second project to rank against it, so a call across every project is
 still that. Without it a call names its own project or falls back to the
 directory the door was spawned in, which is what it did before.
@@ -179,7 +322,7 @@ to borrow a principal from, and answers once, because a stream is not a tool
 call. `--operator` above is the door's counterpart to that `--as` exclusion and
 is not a second spelling of it: it travels with the process rather than with a
 call. `internal/mcpdoor`'s `Globals` table records each one, and a test walks
-the whole subcommand tree against it — a flag that is neither mapped nor
+the whole subcommand tree against it, a flag that is neither mapped nor
 excluded with a reason is a failing test.
 
 ## Jobs
@@ -192,8 +335,8 @@ hsched job add nightly-sweep "0 3 * * *" task --args '{"title":"sweep the board"
 hsched job add heartbeat "*/5 * * * *" shell --args '{"command":"./bin/health"}' --catch_up
 ```
 
-The expression is the standard five fields — minute, hour, day of month,
-month, day of week — with `*`, `*/n`, `a-b`, `a-b/n`, comma lists, and
+The expression is the standard five fields, minute, hour, day of month,
+month, day of week, with `*`, `*/n`, `a-b`, `a-b/n`, comma lists, and
 three-letter month and day names. Both day fields restricted is an **or**, the
 way every cron reads it. The parser is `internal/cron`, a hundred lines of
 bit-setting over five bounded fields, and not a dependency: the syntax has not
@@ -221,7 +364,7 @@ one field.
   so a schedule fires once however many ticks pass over it.
 - The cursor moves **before** the action fires, and it moves whether the
   action fired, failed or was skipped. A daemon that dies mid-action leaves a
-  schedule that did not fire — which the trail says — rather than one that
+  schedule that did not fire, which the trail says, rather than one that
   fires again on the next start.
 - A schedule missed while the daemon was **down** is **skipped**, which is
   cron's own semantics and the default here. The skip is recorded on the job's
@@ -234,8 +377,8 @@ one field.
 - A job **disabled** is passed over silently and records no skip. Re-enabled,
   it fires from the next instant rather than from the backlog.
 
-The decision is a pure function — `internal/job`.`Due` is handed the clock,
-the rows and the cursors, and answers what should happen — so every case above
+The decision is a pure function, `internal/job`.`Due` is handed the clock,
+the rows and the cursors, and answers what should happen, so every case above
 is pinned by a test with no `time.Sleep` and no process in it.
 
 ## Triggers
@@ -259,7 +402,7 @@ nothing can run.
 
 `trigger add` answers a webhook with its URL and its HMAC secret. That answer
 is the **one** time the secret exists anywhere a caller can read it. It is not
-in `trigger list`, not in `dump`, and not in the event trail — the key is kept
+in `trigger list`, not in `dump`, and not in the event trail, the key is kept
 in a file of its own, `<state dir>/sched.secrets.json`, which no door renders.
 Verifying an HMAC needs the key itself, so it cannot be hashed away; where it
 is kept is the only thing left that can carry the rule, and a file `dump` does
@@ -278,7 +421,7 @@ curl -X POST http://127.0.0.1:8797/trigger/deploy \
 The signature is verified over the **raw body, before anything parses a byte
 of it**. What the body says decides nothing: the trigger id is in the path and
 the proof is in the signature, so this door never unmarshals a payload a
-stranger sent. A request that does not verify is **dropped** — it fires
+stranger sent. A request that does not verify is **dropped**, it fires
 nothing, and it lands on the run trail naming the trigger it was aimed at,
 because a URL being probed is something an operator wants to see, and a
 trigger that stopped working because a caller's secret drifted otherwise looks
@@ -299,10 +442,10 @@ starts degraded.
 
 `webhook_addr` is **not** held to loopback: an operator who writes a routable
 address has said so on purpose, and refusing it would be this plugin deciding
-their network for them. It is not silent either — a door that binds something
+their network for them. It is not silent either, a door that binds something
 other than a loopback address says so in the log, once, naming what is now
 reachable off the host. `hsched doctor` prints the address the daemon
-actually got, and why it got none when a port was taken — a door that cannot
+actually got, and why it got none when a port was taken, a door that cannot
 bind never stops the daemon starting, because that would take every schedule
 down with one port.
 
@@ -320,7 +463,7 @@ holds for a watcher re-enabled after a spell off.
 
 Polling rather than `fsnotify` is the dependency budget doing its job: the
 daemon already has this rhythm, and the cost is that a change is noticed
-within one tick rather than at once — the latency a cron job already accepts.
+within one tick rather than at once, the latency a cron job already accepts.
 
 ### Both limits refuse loudly
 
@@ -342,14 +485,14 @@ both read a spent cooldown as unspent.
 
 ## The action vocabulary
 
-An action is data on a job or a trigger row — a kind and its arguments — and
+An action is data on a job or a trigger row, a kind and its arguments, and
 there are four kinds: `task` files one on the htask board, `mail` sends a
 notify or an ask through hmail, `dispatch` brings a worker up through hdis,
 and `shell` runs a command on the host. An unknown kind, a missing argument or
 an argument of the wrong type is refused when the row is **written**, not when
 it fires: a schedule that fails at 3am fails in a log nobody reads. What is
-not bounded here is the length of a free-text argument — a `title`, a
-`description`, a `body`, a `command` — because this plugin only carries it to
+not bounded here is the length of a free-text argument, a `title`, a
+`description`, a `body`, a `command`, because this plugin only carries it to
 the sibling that stores it, and that sibling applies its own §5.9 bound at the
 write that keeps it. A second bound written here is a number that drifts from
 the one that actually decides.
@@ -386,7 +529,7 @@ reads the merged trail oldest first; `--since` takes an event id or a Unix
 millisecond and resumes strictly after it. Each entity's trail keeps its
 newest 1000 events, because the whole document is rewritten on every change,
 and an id that has rotated past is **refused** rather than answered with the
-whole window — a consumer resuming from it would otherwise take the window for
+whole window, a consumer resuming from it would otherwise take the window for
 its own tail.
 
 `hsched events --follow` is the subscription (§8.2). It is handed the backlog
@@ -431,8 +574,8 @@ where the decision is `allow`, `deny` or `defer`. An unconfigured gate allows
 unreadable answer, an oversized answer or a timeout is a deny with the reason
 saying which.
 
-A gate that answers `defer` **parks** the call (§9.3) — recorded, not
-performed — and the caller is refused with `DENIED` carrying the `parked_id`.
+A gate that answers `defer` **parks** the call (§9.3), recorded, not
+performed, and the caller is refused with `DENIED` carrying the `parked_id`.
 `hsched parked list` is where those rows are read, and it answers with the
 project you are standing in and no other (§4.4). Resolving one re-runs the
 verb under the subject the gate stopped, never the resolver's, and does not
@@ -468,8 +611,8 @@ gate_command = ["/usr/local/bin/herdr-policy"]
 on_event = ["/usr/local/bin/notify-me"]
 
 # Where the inbound webhook door listens. Loopback by default: the trust
-# boundary is the local user account. A routable address is accepted — an
-# operator who writes one has said so on purpose — and the daemon says so in
+# boundary is the local user account. A routable address is accepted, an
+# operator who writes one has said so on purpose, and the daemon says so in
 # the log, once, naming what is now reachable off this host. `off` is no
 # inbound door at all, which is what a fleet with only file watchers wants.
 webhook_addr = "127.0.0.1:8797"
@@ -477,7 +620,45 @@ webhook_addr = "127.0.0.1:8797"
 
 Every key takes an environment override, spelled `SCHED_<KEY>`:
 `SCHED_TICK_SECONDS`, `SCHED_GATE_COMMAND`, `SCHED_ON_EVENT`,
-`SCHED_WEBHOOK_ADDR`. An override beats the file.
+`SCHED_WEBHOOK_ADDR`, `SCHED_CLUSTER_POLICY` and so on. An override beats the
+file.
+
+The cluster keys, all optional, with their defaults:
+
+```toml
+cluster_enabled = true                 # false turns the cluster scheduler off
+cluster_tick_seconds = 15              # how often to reconcile, measure and dispatch
+cluster_policy = "balanced"            # balanced, memory, performance, pack, spread, local-first
+cluster_include_local = true           # schedule onto this computer as the worker "local"
+cluster_isolation = "auto"             # auto, worktree or none
+cluster_probe_program = "hsched"       # the hsched a worker runs for the probe, e.g. "~/.local/bin/hsched"
+cluster_probe_ttl_seconds = 20         # reuse a reading this long before probing again
+cluster_probe_timeout_seconds = 20     # give up on one SSH probe after this
+cluster_dispatch_timeout_seconds = 60  # how long agent start waits for the agent to be ready
+cluster_dispatch_grace_seconds = 300   # after a restart, wait this long before deciding a half-done dispatch
+cluster_max_attempts = 3               # dispatch attempts before a job fails
+cluster_default_memory_mb = 3072       # estimate when there is no history
+cluster_default_cpu = 1                # cores reserved when the job does not say
+cluster_overrun_margin_pct = 20        # headroom added when an agent outgrows its reservation
+cluster_history_headroom_pct = 25      # headroom added to learned estimates
+cluster_ageing_minutes = 10            # a waiting job gains one priority point per this many minutes
+cluster_starvation_minutes = 30        # after this, a worker is held clear for a waiting job
+cluster_min_free_memory_mb = 2048      # memory every worker keeps free after placing a job
+cluster_max_cpu_commit = 1.0           # cores that may be reserved, as a share of logical cores
+cluster_max_load_per_core = 2.0        # five-minute load per core above which a worker takes nothing
+cluster_min_free_disk_gb = 5           # free disk below which a worker takes nothing
+cluster_min_battery_pct = 0            # on battery below this, take nothing; 0 is off
+cluster_max_agents = 0                 # per worker; 0 is no limit
+cluster_workers_file = "~/.config/sched/cluster-workers.json"
+cluster_metrics_addr = "off"           # e.g. "127.0.0.1:9464" to serve /metrics; loopback only
+```
+
+The worker defaults (`cluster_min_free_memory_mb` through `cluster_max_agents`)
+apply to every worker unless `cluster-workers.json` says otherwise for that
+worker. A value that does not parse stops the cluster scheduler, with the
+reason in the log and in every cluster verb's refusal, while cron jobs and
+triggers carry on.
+
 
 ### Where everything lives
 
@@ -492,6 +673,8 @@ The short name is `sched`, and everything nameable is derived from it:
 | Log | `<state dir>/sched.log` |
 | Store | `<state dir>/sched.json` |
 | Webhook secrets | `<state dir>/sched.secrets.json`, mode `0600` |
+| Cluster ledger | `<state dir>/cluster.db` (SQLite, WAL), mode `0600` |
+| Per-worker settings | `<config dir>/cluster-workers.json` (optional) |
 
 `SCHED_STATE_DIR` and `SCHED_CONFIG_DIR` override the two directories and take
 precedence over the XDG variables. They are how the tests isolate, and how an
@@ -506,7 +689,12 @@ never deletes anything.
 
 ## Reading the store
 
-The contract's §5.1 store is SQLite. This is a JSON document instead: the
+The cluster ledger (`cluster.db`) is SQLite, because it is where concurrent
+reservations are decided and that needs real transactions. The cron and
+trigger store below is unchanged from upstream.
+
+The contract's §5.1 store is SQLite. The cron and trigger store is a JSON
+document instead: the
 whole set is a handful of rows held in memory anyway, rewritten whole on every
 change, read by one process under the daemon's own lock. A SQLite driver is a
 large dependency for a file that never needs a query, a schema or a second
@@ -521,14 +709,15 @@ to look.
 
 ## The dashboard, on a key
 
-One popup: every schedule with when it fires next, every trigger with what is
+One popup: the cluster's workers and its newest jobs, every schedule with
+when it fires next, every trigger with what is
 holding it down, and the tail of the run trail. It is on Herdr's plugin menu,
 and it is a plugin action, so a key can reach it. It is read-only: a popup
 carries no `HERDR_PANE_ID`, so its principal is the human, and the CRUD stays
 on the gated verbs. The script needs `jq` and says so rather than drawing an
 empty dashboard.
 
-Herdr does not load a plugin's keybindings — a plugin does not get to claim
+Herdr does not load a plugin's keybindings, a plugin does not get to claim
 keys in your config. Copy the block from `keybindings.toml` into
 `~/.config/herdr/config.toml` and change the key to whatever is free:
 
@@ -549,6 +738,60 @@ command; the value is `<plugin id>.<action id>`, both from `herdr-plugin.toml`.
 Pressing the key when the dashboard is already open is a no-op rather than an
 error, so it can be leaned on.
 
+## Security
+
+- Every remote action is a fixed argument vector handed to `herdr` or `ssh`,
+  never a shell string built from your input. The prompt travels as one
+  argument to `herdr agent prompt`, and over Herdr's own SSH bridge as a JSON
+  field. Repository paths and agent arguments are checked against a
+  conservative character set before anything runs; agent names, kinds, pane
+  and machine ids are checked against Herdr's own formats.
+- Remote access is Herdr's saved machines and your OpenSSH configuration,
+  with `BatchMode=yes` so a probe never prompts. No keys or passwords are
+  stored by this plugin.
+- Prompts are kept in the ledger only so they can be sent when the job is
+  dispatched. They are never written to the log, the event trail or a CLI
+  listing; only their length and SHA-256 are.
+- The state directory is `0700`, the socket and `cluster.db` are `0600`, and
+  a ledger file other users can read is refused at start.
+- Mutating cluster verbs go through the same policy gate as everything else:
+  `sched.cluster.submit`, `sched.cluster.cancel`, `sched.cluster.detach`,
+  `sched.cluster.drain` and `sched.cluster.undrain`.
+- No telemetry. The metrics endpoint is off by default and only binds a
+  loopback address.
+
+## Limitations
+
+Be clear about what this does not do yet:
+
+- **macOS collectors are untested on real hardware.** They compile and their
+  parsers have unit tests against sample `sysctl`, `pmset` and `ps` output, but this build was developed and tested on Linux. Memory
+  pressure on macOS comes from `kern.memorystatus_vm_pressure_level`, and
+  per-agent memory from `ps`.
+- **Windows has no live collector.** Declare a Windows worker as static.
+  Placement then uses declared capacity and the scheduler's own reservations,
+  not live readings.
+- **Finished versus lost.** When an agent disappears from `herdr agent list`
+  the job is recorded as finished. If the worker's Herdr server restarted,
+  its agents are gone too (Herdr does not keep processes across a server
+  restart), and that is also recorded as finished rather than lost.
+- **At most once, not exactly once.** If the coordinator stops after asking a
+  worker to start an agent but before hearing back, and the agent is not
+  running when it checks again, the job is failed rather than retried, since
+  it may already have run. Resubmit it if needed.
+- **Herdr's machine health check is not used for placement.** Health comes
+  from the scheduler's own SSH probe, which is one round trip instead of two.
+- **No live migration.** A running agent stays where it started.
+- **Polling, not events.** The scheduler reconciles on a timer
+  (`cluster_tick_seconds`). Herdr's event subscription is not durable across
+  restarts, so it is not relied on.
+- **Repository paths must match across machines** (or be under `~/` with the
+  same layout). There is no per-worker path mapping yet.
+- **Prometheus metrics are a text endpoint and a CLI verb only.** There is no
+  bundled Grafana dashboard.
+- **GitHub Actions CI** is described in [docs/ci/ci.yml](docs/ci/ci.yml) but
+  not enabled, see that file for why and how to turn it on.
+
 ## Building and testing
 
 ```sh
@@ -561,31 +804,38 @@ make install        # go install ./cmd/hsched
 ```
 
 `make test-full` is the gate: nothing is committed on a green `make test`
-alone. `make e2e` is out of the gate on purpose — it builds and runs the
+alone. `make e2e` is out of the gate on purpose, it builds and runs the
 shipped binary and its scripts, and it skips loudly naming what was missing
 rather than passing quietly. `SCHED_E2E_REQUIRED=1` turns that skip into a
 failure, which is what `make release-check` does before a release tag.
 
 Tests never reach the operator's live Herdr, boards, mailbox, config or state
 (§12.3). `internal/testenv` replaces `PATH` with a directory of stand-in
-sibling binaries — replacing it rather than prepending to it, so a call whose
+sibling binaries, replacing it rather than prepending to it, so a call whose
 fake was never written fails as "not found" instead of quietly reaching the
-real thing — and points the state and config directories at temporary ones.
+real thing, and points the state and config directories at temporary ones.
 
 ## Dependencies
 
-The standard library, plus the two libraries every sibling pins, at the
-versions herdr-dispatch pins them:
+The standard library, plus:
 
-- `github.com/spf13/cobra` for the CLI door
-- `github.com/modelcontextprotocol/go-sdk` for the MCP door
+- `github.com/spf13/cobra` for the CLI door (from upstream)
+- `github.com/modelcontextprotocol/go-sdk` for the MCP door (from upstream)
+- `modernc.org/sqlite` for the cluster ledger, a pure Go SQLite with no cgo,
+  so the binary still cross-compiles for macOS and Linux
+- `golang.org/x/sys` for `sysctl` on macOS
 
-There is no TOML library — `internal/config/toml.go` is a hand-written parser
-for the subset this document needs — no config library, no logging library,
-and no SQLite driver. The contract is **not vendored**: it lives in agamemnon
-(`docs/contract.md`), with identical copies in herdr-tasks, herdr-mail and
-herdr-dispatch, and every `§` in this repository cites it by section number.
+There is no TOML library: `internal/config/toml.go` is upstream's
+hand-written parser for the subset this document needs, which is why the
+cluster settings are flat `cluster_*` keys and per-worker settings live in a
+separate JSON file.
 
-## Licence
+## Credits and licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+This is a derivative of [herdr-sched](https://github.com/husniadil/herdr-sched)
+by Husni Adil Makmur (MIT), whose commit history is preserved here. Everything
+under `internal/cluster`, the cluster verbs and the cluster documentation are
+additions. [Herdr](https://github.com/herdrdev/herdr) (Apache-2.0) is
+called as an external program and is not included.

@@ -348,7 +348,7 @@ func warnings(job Job, w Worker) []string {
 	var out []string
 	s := w.Effective()
 	if len(s.Agents) == 0 && job.Kind != "" && w.Snapshot.Backend != resource.BackendStatic && !contains(w.Snapshot.Agents, job.Kind) {
-		out = append(out, fmt.Sprintf("%s was not found on this worker's PATH over SSH; Herdr's shell may still have it", job.Kind))
+		out = append(out, fmt.Sprintf("%s was not found on the PATH the probe saw; Herdr's own shell may still have it", job.Kind))
 	}
 	if w.Snapshot.Memory.Pressure == resource.PressureWarn {
 		out = append(out, "memory pressure is elevated")

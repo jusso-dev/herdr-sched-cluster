@@ -69,11 +69,13 @@ tested directly and with property-based tests.
 ```text
  submit --> queued --> reserved --> dispatching --> running --> finished
                ^           |              |             |
-               |           +--(release)---+             +--> lost (worker's Herdr restarted, agent gone)
+               |           +--(release)---+             +--> detached (operator stopped tracking it)
                |                          |
-               +------ requeued <---------+   (dispatch failed, attempts left)
-                                          +--> failed (attempts used up)
+               +------ requeued <---------+   (dispatch failed before any agent existed, attempts left)
+                                          +--> failed (attempts used up, or the outcome of an
+                                                       agent start is unknown and no agent is found)
  queued/reserved --> cancelled
+ (lost is reserved in the schema; v1 records an agent that vanished as finished, see Restarts)
 ```
 
 1. **Submit.** The request is validated and stored as `queued`. The
@@ -160,11 +162,11 @@ it. A queued job explains why it is still waiting.
 - **Backfill:** if the job at the front does not fit anywhere, later jobs that
   do fit are still placed.
 - **Starvation guard:** once the front job has waited longer than
-  `starvation_seconds`, the coordinator picks the worker where it would fit
+  `cluster_starvation_minutes`, the coordinator picks the worker where it would fit
   soonest and stops backfilling onto that worker until the job is placed.
 - Cancelling a queued or reserved job releases anything it holds. Cancelling
-  a running job is refused unless `--force-detach` is given, which only stops
-  tracking it. It never kills the agent.
+  a running job is refused. `hsched cluster detach <id>` stops tracking a
+  running job and releases its reservation. Neither ever kills the agent.
 
 ## Resource accounting
 
@@ -172,14 +174,16 @@ it. A queued job explains why it is still waiting.
   free plus inactive plus purgeable pages on macOS. Swap and the kernel's
   pressure signal are used as well, because free RAM alone is misleading on
   macOS.
-- A reservation counts in full until the agent has been running for
-  `settle_seconds`. After that, the coordinator assumes the operating system's
-  numbers include the agent and only counts the part of the reservation the
-  agent has not used yet. This avoids counting a running agent twice.
+- A reservation counts in full until the agent's own usage has been
+  measured. After that, the operating system's numbers already include what
+  the agent uses, so only the part of the reservation it has not used yet is
+  counted as pending (`reserved - min(observed, reserved)`). This avoids
+  counting a running agent twice. A static worker has no live numbers, so its
+  reservations always count in full.
 - When a probe can see an agent's processes (`pane process-info` gives the
   PIDs), it samples their resident memory and CPU. If an agent uses more than
-  it reserved, its reservation is raised to what it uses plus 10%, and a
-  `cluster.job.overrun` event is written. Nothing is killed.
+  it reserved, its reservation is raised to what it uses plus
+  `cluster_overrun_margin_pct` (default 20%), and a `cluster.job.overrun` event is written. Nothing is killed.
 - Peak usage is remembered per agent kind and repository and used as the
   default estimate for the next job of the same shape (exponentially weighted).
 
@@ -191,12 +195,18 @@ are still running there. `hsched cluster undrain` reverses it.
 
 ## Restarts
 
-- **Coordinator restart:** all state is in SQLite. On start, jobs in
-  `reserved` or `dispatching` are checked against Herdr: if the agent
-  `hsc-<id>` exists, the job becomes `running`; if not, its reservation is
-  released and it is requeued. Running jobs are reconciled on the first tick.
+- **Coordinator restart:** all state is in SQLite. Jobs in `reserved` or
+  `dispatching` are checked against Herdr on each tick: if the agent
+  `hsc-<id>` exists, the job becomes `running`. If not, nothing is decided
+  until `cluster_dispatch_grace_seconds` has passed since the job last moved.
+  Then a job that never reached the agent start is requeued, and a job that
+  may have reached it is failed rather than retried (at most once: the agent
+  may already have run and exited). Running jobs are reconciled on the first
+  tick.
 - **Worker Herdr restart:** agents on that worker are gone (see the gap
-  analysis). Reconciliation marks those jobs `lost` and frees the capacity.
+  analysis). Reconciliation sees them missing from `agent list`, records the
+  jobs as finished and frees the capacity. Telling this apart from a normal
+  exit (`lost`) is a known gap.
 - **Worker disconnect:** jobs stay `running` and keep their reservations, and
   the worker is not eligible for new work until it answers again.
 

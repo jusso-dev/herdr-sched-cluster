@@ -83,10 +83,23 @@ This file is updated in the same commit as the work it describes.
 
 | Item | Status |
 | --- | --- |
-| Cluster verbs on both doors (CLI and MCP) through the registry | not started |
-| Config reference for the `cluster_*` keys | not started |
-| Prometheus metrics | not started |
-| Dashboard popup | not started |
-| README for people: install, register machines, config, CLI, limitations | not started |
-| Install and upgrade steps | not started |
-| CI on Linux and macOS | not started |
+| Cluster verbs on both doors (CLI and MCP) through the registry | done: `cluster workers`, `submit`, `jobs`, `explain`, `cancel`, `detach`, `drain`, `undrain`, `events`, `metrics`; mutating ones gated as `sched.cluster.*`; parity tests pin the tool list |
+| Daemon integration | done: own tick (`cluster_tick_seconds`), a pump straight after each submit, ledger at `<state dir>/cluster.db`; a bad cluster config turns only the cluster off, with the reason in every cluster verb's refusal |
+| Config reference for the `cluster_*` keys | done: 25 flat keys in `sched.toml` (the upstream parser has no tables) plus `cluster-workers.json` for per-worker settings; unknown fields refused; README test checks every key is documented |
+| Prometheus metrics | done: `hsched cluster metrics` and an optional loopback-only `/metrics` (`cluster_metrics_addr`) |
+| Dashboard popup | done: the existing popup gains cluster workers and jobs (read-only verbs, checked by the manifest test) |
+| README for people: install, register machines, config, CLI, limitations | done |
+| Install and upgrade steps | done (README); not exercised against a real Herdr install here, since this box has no Herdr |
+| End-to-end check of the real binary | done on Linux with a stand-in `herdr` script: daemon start, `cluster workers`, `submit`, dispatch, `jobs`, `explain`, `metrics`, file modes `0600`/`0700`, prompt absent from logs. Not run against a real Herdr or a real second machine |
+| CI on Linux and macOS | not enabled: the publishing token lacks GitHub's `workflow` scope. The workflow is in `docs/ci/ci.yml` with the two commands to enable it |
+| Upstream tests | pass, except two upstream file-watcher tests that also fail on unmodified upstream on this box (overlayfs mtime granularity); upstream CI was green |
+
+## Known gaps
+
+- macOS collectors and the macOS process sampler have not run on Apple hardware.
+- No live Windows collector; Windows workers are static only.
+- A worker Herdr restart is recorded as `finished`, not `lost`.
+- `herdr machine status` is read by the adapter but not used for placement.
+- No per-worker repository path mapping.
+- No end-to-end run against real Herdr servers on two machines.
+- Sections 3.3 to 13 of the brief were truncated in the copy this work started from; see GAP-ANALYSIS section 7.

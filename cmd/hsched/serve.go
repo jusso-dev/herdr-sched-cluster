@@ -1,6 +1,14 @@
 package main
 
 import (
+	"path/filepath"
+
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/clusterconf"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/coord"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/herdrx"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/ledger"
+	"github.com/jusso-dev/herdr-sched-cluster/internal/cluster/transport"
+
 	"context"
 	"errors"
 	"log"
@@ -109,6 +117,10 @@ func serve(f *daemonFlags) error {
 		Log:         log.Default(),
 		LogPath:     f.logPath,
 		Lock:        lock,
+		Cluster:     openCluster(cfg),
+	}
+	if d.Cluster.Coord != nil {
+		defer d.Cluster.Coord.L.Close()
 	}
 	// Every run reaches the followers and the §8.3 hook the same way every
 	// other event does.
@@ -123,4 +135,27 @@ func serve(f *daemonFlags) error {
 		return nil
 	}
 	return err
+}
+
+// openCluster builds the distributed scheduler from the config. A cluster
+// that cannot start is logged and refused per verb; it never stops the
+// cron and trigger half of the daemon from serving.
+func openCluster(cfg *config.Config) *daemon.Cluster {
+	set, err := clusterconf.Build(cfg)
+	if err != nil {
+		log.Printf("cluster scheduler off: %v", err)
+		return &daemon.Cluster{Disabled: "the cluster scheduler is off: " + err.Error()}
+	}
+	if !set.Enabled {
+		return &daemon.Cluster{Disabled: "the cluster scheduler is off (cluster_enabled = false)"}
+	}
+	l, err := ledger.Open(filepath.Join(config.StateDir(), "cluster.db"))
+	if err != nil {
+		log.Printf("cluster scheduler off: %v", err)
+		return &daemon.Cluster{Disabled: "the cluster ledger could not be opened: " + err.Error()}
+	}
+	prober := coord.DefaultProber{SSH: transport.SSH{Timeout: set.ProbeTimeout}}
+	c := coord.New(l, herdrx.New(), prober, set.Coord)
+	log.Printf("cluster scheduler on: ledger %s, policy %s, tick %s", l.Path, set.Coord.Policy, set.Tick)
+	return &daemon.Cluster{Coord: c, Tick: set.Tick, MetricsAddr: set.MetricsAddr}
 }
