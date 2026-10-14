@@ -106,6 +106,10 @@ type Settings struct {
 	// high) at which new work is still admitted. Empty means the default,
 	// moderate, so only heavy swapping refuses work.
 	MaxSwapPressure string `json:"max_swap_pressure,omitempty"`
+	// RequireNighthawk refuses a worker unless `nighthawk report` says
+	// health is ok and the mode is unattended. A down daemon or attended
+	// mode cannot take the job.
+	RequireNighthawk bool `json:"require_nighthawk,omitempty"`
 }
 
 // DefaultSettings are used for anything the operator did not set.
@@ -148,6 +152,11 @@ type Worker struct {
 	// HeldFor names a queued job this worker is being kept clear for by the
 	// starvation guard. Only that job may be placed here.
 	HeldFor string `json:"held_for,omitempty"`
+	// Nighthawk is "ok" or "down" from `nighthawk report`. Empty means it
+	// was not required and was not read.
+	Nighthawk string `json:"nighthawk,omitempty"`
+	// NighthawkMode is attended or unattended when the report was read.
+	NighthawkMode string `json:"nighthawk_mode,omitempty"`
 }
 
 // Job is what placement needs to know about a request.
@@ -389,6 +398,14 @@ func Eligible(job Job, w Worker) []string {
 	}
 	if s.MinBatteryPct > 0 && snap.Power.Source == resource.PowerBattery && snap.Power.BatteryPct >= 0 && snap.Power.BatteryPct < s.MinBatteryPct {
 		r = append(r, fmt.Sprintf("on battery at %d%%, below %d%%", snap.Power.BatteryPct, s.MinBatteryPct))
+	}
+	if s.RequireNighthawk {
+		switch {
+		case w.Nighthawk != "ok":
+			r = append(r, "nighthawk is down")
+		case w.NighthawkMode != "unattended":
+			r = append(r, "nighthawk is attended-only")
+		}
 	}
 	if snap.Thermal == resource.ThermalCritical {
 		r = append(r, "thermal state is critical")
