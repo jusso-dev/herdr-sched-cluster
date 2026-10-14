@@ -54,6 +54,9 @@ type WorkerEntry struct {
 	MaxCPUUtilPct    float64 `json:"max_cpu_utilisation_percent,omitempty"`
 	MemoryReservePct float64 `json:"memory_reserve_percent,omitempty"`
 	MaxSwapPressure  string  `json:"max_swap_pressure,omitempty"`
+	// RequireNighthawk places work here only when nighthawk report is ok
+	// and the mode is unattended.
+	RequireNighthawk bool `json:"require_nighthawk,omitempty"`
 	// PathMap rewrites repository paths for this worker by prefix, for a
 	// machine that keeps its checkouts somewhere else.
 	PathMap map[string]string `json:"path_map,omitempty"`
@@ -261,7 +264,8 @@ func LoadWorkers(path string) (map[string]coord.WorkerConfig, error) {
 			Settings: placement.Settings{MaxAgents: e.MaxAgents, MinFreeMemoryMB: e.MinFreeMemoryMB, MaxCPUCommit: e.MaxCPUCommit,
 				MaxLoadPerCore: e.MaxLoadPerCore, MinFreeDiskGB: e.MinFreeDiskGB, MinBatteryPct: e.MinBatteryPct,
 				Weight: e.Weight, Labels: e.Labels, Agents: e.Agents, MaxCPUUtilPct: e.MaxCPUUtilPct,
-				MemoryReservePct: e.MemoryReservePct, MaxSwapPressure: e.MaxSwapPressure},
+				MemoryReservePct: e.MemoryReservePct, MaxSwapPressure: e.MaxSwapPressure,
+				RequireNighthawk: e.RequireNighthawk},
 			PathMap: e.PathMap,
 		}
 	}

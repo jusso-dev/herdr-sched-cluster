@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"path"
 	"sort"
 	"strings"
@@ -83,6 +84,23 @@ func (p DefaultProber) Probe(ctx context.Context, t Target, req resource.Request
 		r, err := p.SSH.Probe(ctx, t.SSHTarget, t.Program, req)
 		return r.Snapshot, r.LatencyMS, err
 	}
+}
+
+// Nighthawk reads `nighthawk report` on the worker. A failure is down.
+func (p DefaultProber) Nighthawk(ctx context.Context, t Target) (string, string) {
+	var (
+		b   []byte
+		err error
+	)
+	switch {
+	case t.Local:
+		b, err = exec.CommandContext(ctx, "nighthawk", "report").Output()
+	case t.SSHTarget != "":
+		b, err = p.SSH.Report(ctx, t.SSHTarget)
+	default:
+		return "down", ""
+	}
+	return placement.ReadReport(b, err)
 }
 
 // Coordinator ties the pieces together. One coordinator runs per state
@@ -263,6 +281,9 @@ func (c *Coordinator) workersWith(ctx context.Context, force bool, pids map[stri
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			out[i] = c.worker(ctx, t, rows[t.ID], force, paths, pids[t.ID])
+			if out[i].State == placement.StateReady && t.Settings.RequireNighthawk {
+				out[i].Nighthawk, out[i].NighthawkMode = c.nighthawk(ctx, t)
+			}
 		}(i, t)
 	}
 	wg.Wait()
@@ -294,6 +315,18 @@ func (c *Coordinator) workersWith(ctx context.Context, force bool, pids map[stri
 		_ = c.L.AddEvent(ctx, "cluster.herdr.machine_list_failed", "", "", map[string]any{"error": terr.Error()})
 	}
 	return out, nil
+}
+
+type nighthawkProber interface {
+	Nighthawk(ctx context.Context, t Target) (health, mode string)
+}
+
+func (c *Coordinator) nighthawk(ctx context.Context, t Target) (string, string) {
+	np, ok := c.P.(nighthawkProber)
+	if !ok {
+		return "down", ""
+	}
+	return np.Nighthawk(ctx, t)
 }
 
 // smoothCPU folds a worker's newest CPU reading into its moving average, so

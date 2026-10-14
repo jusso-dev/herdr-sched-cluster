@@ -213,6 +213,46 @@ func (s SSH) Probe(ctx context.Context, target, program string, req resource.Req
 	return Result{Snapshot: snap, LatencyMS: lat.Milliseconds()}, nil
 }
 
+// Report runs `nighthawk report` on target. The remote argv is fixed.
+func (s SSH) Report(ctx context.Context, target string) ([]byte, error) {
+	if err := ValidateTarget(target); err != nil {
+		return nil, err
+	}
+	bin := s.Binary
+	if bin == "" {
+		bin = "ssh"
+	}
+	ct := s.ConnectTimeout
+	if ct <= 0 {
+		ct = 5 * time.Second
+	}
+	to := s.Timeout
+	if to <= 0 {
+		to = 8 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, to)
+	defer cancel()
+	argv := []string{
+		"-T",
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=" + strconv.Itoa(int(ct.Seconds())),
+		"--", target,
+		"nighthawk", "report",
+	}
+	cmd := exec.CommandContext(ctx, bin, argv...)
+	var stdout, stderr limited
+	stdout.max, stderr.max = maxOutput, 4096
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, &Error{Target: target, Message: msg, Auth: authFailure(msg)}
+	}
+	return stdout.Bytes(), nil
+}
+
 // GitOpWords renders a typed Git operation as the remote command, every
 // word allow-listed and quoted as RemoteWords does.
 func GitOpWords(program string, r gitop.Request) ([]string, error) {

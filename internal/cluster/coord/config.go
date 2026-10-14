@@ -317,6 +317,9 @@ func merge(def, w placement.Settings) placement.Settings {
 	if w.MaxSwapPressure != "" {
 		out.MaxSwapPressure = w.MaxSwapPressure
 	}
+	if w.RequireNighthawk {
+		out.RequireNighthawk = true
+	}
 	return out
 }
 
